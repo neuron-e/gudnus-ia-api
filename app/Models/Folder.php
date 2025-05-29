@@ -194,12 +194,13 @@ class Folder extends Model
         return false;
     }
 
+
     public function storeImage(string $binary, string $originalName): Image
     {
         $filename = uniqid() . '_' . Str::slug(pathinfo($originalName, PATHINFO_FILENAME)) . '.' . pathinfo($originalName, PATHINFO_EXTENSION);
         $path = "projects/{$this->project_id}/images/" . $filename;
 
-        Storage::disk('public')->put($path, $binary);
+        Storage::disk('wasabi')->put($path, $binary);
 
         return Image::create([
             'folder_id' => $this->id,

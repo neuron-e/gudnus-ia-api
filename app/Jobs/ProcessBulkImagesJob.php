@@ -14,6 +14,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Storage;
 
 class ProcessBulkImagesJob implements ShouldQueue
 {
@@ -32,17 +33,24 @@ class ProcessBulkImagesJob implements ShouldQueue
 
         foreach ($images as $processed) {
             $image = $processed->image;
-            $inputPath = storage_path("app/public/" . $processed->corrected_path);
-            if (!file_exists($inputPath)) continue;
+            $wasabiDisk = Storage::disk('wasabi');
+
+            if (!$wasabiDisk->exists($processed->corrected_path)) continue;
+
+            // Descargar temporalmente
+            $tempPath = storage_path('app/tmp/' . uniqid('wasabi_', true) . '.jpg');
+            file_put_contents($tempPath, $wasabiDisk->get($processed->corrected_path));
 
             try {
                 $response = Http::withHeaders([
                     'Prediction-Key' => env('AZURE_PREDICTION_KEY'),
                     'Content-Type' => 'application/octet-stream',
                 ])->withBody(
-                    file_get_contents($inputPath),
+                    file_get_contents($tempPath),
                     'application/octet-stream'
                 )->post(env('AZURE_PREDICTION_FULL_ENDPOINT'));
+
+                @unlink($tempPath); // limpieza
 
                 if ($response->successful()) {
                     $json = $response->json();
@@ -82,7 +90,7 @@ class ProcessBulkImagesJob implements ShouldQueue
             }
         }
 
-        // ✅ Si terminó este job, comprobar si ya se completó todo el batch
+        // ✅ Comprobación final del batch
         if ($batch && $batch->processed_images >= $batch->total_images) {
             $batch->update(['status' => 'done']);
             if ($this->notifyEmail) {

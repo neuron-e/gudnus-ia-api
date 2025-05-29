@@ -392,12 +392,11 @@ class FolderController extends Controller
             }
 
             // Eliminar archivos físicos si están en disco
-            if (Storage::disk('public')->exists($image->original_path)) {
-                Storage::disk('public')->delete($image->original_path);
+            if (Storage::disk('wasabi')->exists($image->original_path)) {
+                Storage::disk('wasabi')->delete($image->original_path);
             }
-
-            if ($image->processedImage && Storage::disk('public')->exists($image->processedImage->corrected_path)) {
-                Storage::disk('public')->delete($image->processedImage->corrected_path);
+            if ($image->processedImage && Storage::disk('wasabi')->exists($image->processedImage->corrected_path)) {
+                Storage::disk('wasabi')->delete($image->processedImage->corrected_path);
             }
 
             $image->processedImage()?->delete();
@@ -427,13 +426,11 @@ class FolderController extends Controller
     {
         foreach ($folder->images as $img) {
             // Eliminar imagen original
-            if ($img->original_path && Storage::disk('public')->exists($img->original_path)) {
-                Storage::disk('public')->delete($img->original_path);
+            if ($img->original_path && Storage::disk('wasabi')->exists($img->original_path)) {
+                Storage::disk('wasabi')->delete($img->original_path);
             }
-
-            // Eliminar imagen procesada
             if ($img->processedImage && $img->processedImage->corrected_path) {
-                Storage::disk('public')->delete($img->processedImage->corrected_path);
+                Storage::disk('wasabi')->delete($img->processedImage->corrected_path);
                 $img->processedImage->delete();
             }
 

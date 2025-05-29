@@ -34,16 +34,14 @@ class ImageController extends Controller
             'image' => 'required|image|mimes:jpg,jpeg,png,bmp'
         ]);
 
-        // 🔁 Eliminar imagen existente (BD y storage)
         foreach ($folder->images as $existing) {
-            if (Storage::disk('public')->exists($existing->original_path)) {
-                Storage::disk('public')->delete($existing->original_path);
+            if (Storage::disk('wasabi')->exists($existing->original_path)) {
+                Storage::disk('wasabi')->delete($existing->original_path);
             }
             $existing->delete();
         }
 
-        // 📥 Subir imagen original
-        $path = $request->file('image')->store("projects/{$folder->project_id}/images", 'public');
+        $path = $request->file('image')->store("projects/{$folder->project_id}/images", 'wasabi');
 
         $image = Image::create([
             'folder_id' => $folder->id,
@@ -52,7 +50,6 @@ class ImageController extends Controller
             'original_path' => $path,
         ]);
 
-        // Procesar recorte
         dispatch(new \App\Jobs\ProcessImageImmediatelyJob($image->id, null));
 
         return response()->json([
@@ -83,19 +80,12 @@ class ImageController extends Controller
             $zip->extractTo($path);
             $zip->close();
         } elseif ($ext === 'rar') {
-            $rarPath = $file->getPathname();
-            $cmd = "unrar x -y \"$rarPath\" \"$path\"";
+            $cmd = "unrar x -y \"{$file->getPathname()}\" \"{$path}\"";
             exec($cmd, $output, $code);
-            if ($code !== 0) {
-                return response()->json(['error' => 'No se pudo extraer el RAR'], 500);
-            }
+            if ($code !== 0) return response()->json(['error' => 'No se pudo extraer el RAR'], 500);
         }
 
-        $modules = Folder::where('project_id', $project->id)
-            ->where('type', 'modulo')
-            ->with('images')
-            ->get();
-
+        $modules = Folder::where('project_id', $project->id)->where('type', 'modulo')->with('images')->get();
         $matched = 0;
         $notMatched = 0;
 
@@ -108,16 +98,14 @@ class ImageController extends Controller
                 continue;
             }
 
-            // Borrar imagen anterior
             foreach ($module->images as $oldImg) {
-                if (Storage::disk('public')->exists($oldImg->original_path)) {
-                    Storage::disk('public')->delete($oldImg->original_path);
+                if (Storage::disk('wasabi')->exists($oldImg->original_path)) {
+                    Storage::disk('wasabi')->delete($oldImg->original_path);
                 }
                 $oldImg->delete();
             }
 
-            // Guardar nueva
-            $stored = Storage::disk('public')->putFile("projects/{$project->id}/images", $imgPath);
+            $stored = Storage::disk('wasabi')->putFile("projects/{$project->id}/images", $imgPath);
 
             $image = Image::create([
                 'folder_id' => $module->id,
@@ -126,9 +114,7 @@ class ImageController extends Controller
                 'original_path' => $stored,
             ]);
 
-            // Procesar recorte
             dispatch(new \App\Jobs\ProcessImageImmediatelyJob($image->id));
-
             $matched++;
         }
 
@@ -234,20 +220,26 @@ class ImageController extends Controller
             'points.*' => 'array|size:2'
         ]);
 
-        if (!Storage::disk('public')->exists($image->original_path)) {
+        $wasabiDisk = Storage::disk('wasabi');
+        if (!$wasabiDisk->exists($image->original_path)) {
             return response()->json(['error' => 'Imagen no encontrada'], 404);
         }
 
-        $inputPath = storage_path("app/public/{$image->original_path}");
+        $tempDir = storage_path("app/temp_crop_{$image->id}");
+        File::makeDirectory($tempDir, 0755, true);
+
+        $tempInput = "$tempDir/input.jpg";
+        File::put($tempInput, $wasabiDisk->get($image->original_path));
+
         $filename = 'manual_' . Str::random(8) . '.jpg';
         $relativeProcessed = "projects/{$image->project_id}/images/processed/{$filename}";
-        $outputPath = storage_path("app/public/{$relativeProcessed}");
+        $outputPath = "$tempDir/output.jpg";
 
         $pointsArg = implode(',', array_map(fn($p) => implode('_', $p), $data['points']));
 
         $pythonPath = env('PYTHON_PATH', 'python3');
         $scriptPath = storage_path('app/scripts/manual_crop_transform.py');
-        $cmd = "\"$pythonPath\" \"$scriptPath\" \"$inputPath\" \"$outputPath\" \"$pointsArg\"";
+        $cmd = "\"$pythonPath\" \"$scriptPath\" \"$tempInput\" \"$outputPath\" \"$pointsArg\"";
 
         exec($cmd, $output, $returnCode);
         $json = json_decode(implode('', $output), true);
@@ -257,7 +249,9 @@ class ImageController extends Controller
             return response()->json(['error' => 'Recorte manual fallido', 'output' => $output], 500);
         }
 
-        // Guardar resultado
+        $wasabiDisk->put($relativeProcessed, File::get($outputPath));
+        File::deleteDirectory($tempDir);
+
         $processed = $image->processedImage ?? new ProcessedImage();
         $processed->corrected_path = $relativeProcessed;
         $image->processedImage()->save($processed);
@@ -294,13 +288,18 @@ class ImageController extends Controller
 
     public function base64(Image $image)
     {
-        if (!$image->processedImage || !Storage::disk('public')->exists($image->processedImage->corrected_path)) {
+        $wasabiDisk = Storage::disk('wasabi');
+
+        if (!$image->processedImage || !$wasabiDisk->exists($image->processedImage->corrected_path)) {
             return response()->json(['error' => 'Imagen no disponible'], 404);
         }
 
-        $path = storage_path('app/public/' . $image->processedImage->corrected_path);
-        $type = pathinfo($path, PATHINFO_EXTENSION);
-        $data = file_get_contents($path);
+        $tempPath = storage_path('app/temp_base64_' . $image->id . '.jpg');
+        File::put($tempPath, $wasabiDisk->get($image->processedImage->corrected_path));
+        $type = pathinfo($tempPath, PATHINFO_EXTENSION);
+        $data = file_get_contents($tempPath);
+        unlink($tempPath);
+
         $base64 = 'data:image/' . $type . ';base64,' . base64_encode($data);
 
         return response()->json(['base64' => $base64]);

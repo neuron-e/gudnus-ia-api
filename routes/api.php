@@ -26,6 +26,9 @@ Route::post('/login', function (Request $request) {
     ]);
 });
 
+Route::get('/wasabi-image', [\App\Http\Controllers\Api\ImageProxyController::class, 'show']);
+
+
 // Logout
 Route::middleware('auth:sanctum')->post('/logout', function (Request $request) {
     $request->user()->currentAccessToken()->delete();

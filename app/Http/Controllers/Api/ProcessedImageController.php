@@ -12,6 +12,7 @@ use App\Models\Project;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 class ProcessedImageController extends Controller
@@ -26,13 +27,15 @@ class ProcessedImageController extends Controller
             ], 400);
         }
 
-        $correctedPath = storage_path('app/public/' . $image->processedImage->corrected_path);
+        $correctedPath = $image->processedImage->corrected_path;
 
-        if (!file_exists($correctedPath)) {
+        if (!Storage::disk('wasabi')->exists($correctedPath)) {
             return response()->json([
                 'error' => 'La imagen recortada no existe en el sistema.'
             ], 404);
         }
+
+        $imageContent = Storage::disk('wasabi')->get($correctedPath);
 
         Log::info('Azure Prediction Request', [
             'file_path' => $correctedPath,
@@ -42,7 +45,7 @@ class ProcessedImageController extends Controller
             'Prediction-Key' => env('AZURE_PREDICTION_KEY'),
             'Content-Type' => 'application/octet-stream',
         ])->withBody(
-            file_get_contents($correctedPath),
+            $imageContent,
             'application/octet-stream'
         )->post(env('AZURE_PREDICTION_FULL_ENDPOINT'));
 
