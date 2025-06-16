@@ -3,12 +3,14 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AnalysisBatch;
 use App\Models\Folder;
 use App\Models\Image;
 use App\Models\ImageAnalysisResult;
 use App\Models\ImageBatch;
 use App\Models\ProcessedImage;
 use App\Models\Project;
+use App\Services\ImageProcessingService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
@@ -25,6 +27,20 @@ class ImageController extends Controller
         return $folder->images;
     }
 
+    public function imageProcessedStatus(Image $image)
+    {
+        return response()->json([
+            'processed' => $image->is_processed
+        ]);
+    }
+
+    public function imageAnalysisStatus(Image $image)
+    {
+        return response()->json([
+            'processed' => $image->is_processed
+        ]);
+    }
+
     /**
      * Store a newly created resource in storage.
      */
@@ -34,6 +50,7 @@ class ImageController extends Controller
             'image' => 'required|image|mimes:jpg,jpeg,png,bmp'
         ]);
 
+        // Eliminar imagen existente si la hay
         foreach ($folder->images as $existing) {
             if (Storage::disk('wasabi')->exists($existing->original_path)) {
                 Storage::disk('wasabi')->delete($existing->original_path);
@@ -41,6 +58,7 @@ class ImageController extends Controller
             $existing->delete();
         }
 
+        // Guardar imagen original
         $path = $request->file('image')->store("projects/{$folder->project_id}/images", 'wasabi');
 
         $image = Image::create([
@@ -50,12 +68,24 @@ class ImageController extends Controller
             'original_path' => $path,
         ]);
 
-        dispatch(new \App\Jobs\ProcessImageImmediatelyJob($image->id, null));
+        // Procesar imagen sin usar job
+        $processedImage = app(\App\Services\ImageProcessingService::class)->process($image);
 
+        // 🔴 Verificar si hubo error
+        if (!$processedImage || $processedImage->status === 'error') {
+            return response()->json([
+                'ok' => false,
+                'image' => $image->fresh(['processedImage', 'analysisResult']),
+                'msg' => 'La imagen no se pudo procesar correctamente.',
+                'error' => 'processing_failed'
+            ], 500);
+        }
+
+        // ✅ Imagen procesada correctamente
         return response()->json([
             'ok' => true,
-            'image' => $image,
-            'msg' => 'Imagen subida y encolada para procesado.',
+            'image' => $processedImage,
+            'msg' => 'Imagen subida y procesada correctamente.',
             'error' => null,
         ]);
     }
@@ -259,6 +289,24 @@ class ImageController extends Controller
         $image->update(['status' => 'processed']);
 
         return response()->json(['ok' => true, 'path' => $relativeProcessed]);
+    }
+
+    public function saveManualErrors(Request $request, $imageId)
+    {
+        $request->validate([
+            'edits' => 'required|array',
+        ]);
+
+        $image = Image::with('processedImage')->findOrFail($imageId);
+
+        if (!$image->processedImage) {
+            return response()->json(['message' => 'No hay imagen procesada'], 400);
+        }
+
+        $image->processedImage->error_edits_json = $request->input('edits');
+        $image->processedImage->save();
+
+        return response()->json(['message' => 'Errores manuales guardados correctamente']);
     }
 
 

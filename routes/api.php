@@ -34,7 +34,6 @@ Route::middleware('auth:sanctum')->post('/logout', function (Request $request) {
     $request->user()->currentAccessToken()->delete();
     return response()->json(['message' => 'Sesión cerrada']);
 });
-
 Route::prefix('projects')->group(function () {
     Route::apiResource('/', \App\Http\Controllers\Api\ProjectController::class)->parameters(['' => 'project']);
 
@@ -58,6 +57,7 @@ Route::prefix('projects')->group(function () {
 
 });
 
+
 Route::prefix('folders')->group(function () {
     Route::get('/{folder}/images', [\App\Http\Controllers\Api\ImageController::class, 'index']);
     Route::post('/{folder}/images/upload', [\App\Http\Controllers\Api\ImageController::class, 'upload']);
@@ -70,8 +70,12 @@ Route::post('/images/{project}/bulk-process', [\App\Http\Controllers\Api\Process
 
 Route::get('/images/{image}/base64', [App\Http\Controllers\Api\ImageController::class, 'base64']);
 Route::post('/images/{image}/manual-crop', [App\Http\Controllers\Api\ImageController::class, 'manualCrop']);
+Route::post('/images/{image}/manual-errors', [App\Http\Controllers\Api\ImageController::class, 'saveManualErrors']);
+Route::post('/images/{image}/status-processed', [App\Http\Controllers\Api\ImageController::class, 'imageProcessedStatus']);
+Route::post('/images/{image}/status-analysis', [App\Http\Controllers\Api\ImageController::class, 'imageAnalysisStatus']);
 
 
 Route::get('/projects/{project}/processing-status', [AnalysisBatchController::class, 'processingStatus']);
+Route::get('/projects/{project}/processing-status-image', [AnalysisBatchController::class, 'processingStatusImage']);
 
 

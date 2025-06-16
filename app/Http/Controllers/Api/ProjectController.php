@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Folder;
+use App\Models\Image;
 use App\Models\ImageBatch;
 use App\Models\Project;
 use Illuminate\Http\Request;
@@ -14,9 +15,16 @@ class ProjectController extends Controller
     /**
      * Display a listing of projects.
      */
-    public function index()
+    public function index(Request $request)
     {
-        return Project::all();
+        $perPage = $request->get('per_page', 10);
+        $query = Project::query();
+
+        if ($request->has('search')) {
+            $query->where('name', 'like', '%' . $request->search . '%');
+        }
+
+        return $query->paginate($perPage);
     }
 
     /**
@@ -115,19 +123,57 @@ class ProjectController extends Controller
         return $project;
     }
 
-    /**
-     * Remove the specified project from storage.
-     */
-    public function destroy(Project $project)
-    {
-        // Primero eliminar todas las carpetas asociadas
-        Folder::where('project_id', $project->id)->delete();
 
-        // Luego eliminar el proyecto
+    public function destroy(Project $project, Request $request)
+    {
+        $force = $request->get('force', false);
+
+        // 1. Obtener carpetas
+        $folders = Folder::where('project_id', $project->id)->with('images')->get();
+        $folderIds = $folders->pluck('id');
+
+        // 2. Obtener todas las imágenes con relaciones
+        $images = \App\Models\Image::whereIn('folder_id', $folderIds)
+            ->with(['processedImage', 'analysisResult'])
+            ->get();
+
+        $folderCount = $folders->count();
+        $imageCount = $images->count();
+        $processed = $images->filter(fn($img) => $img->processedImage !== null);
+        $analyzedCount = $processed->filter(fn($img) => $img->processedImage->ai_response_json !== null)->count();
+        $processedCount = $processed->count();
+        $unprocessedCount = $imageCount - $processedCount;
+
+        if (!$force && ($folderCount > 0 || $imageCount > 0)) {
+            return response()->json([
+                'message' => 'Este proyecto contiene contenido que será eliminado:',
+                'requires_confirmation' => true,
+                'summary' => [
+                    'folders' => $folderCount,
+                    'images' => $imageCount,
+                    'processed' => $processedCount,
+                    'analyzed' => $analyzedCount,
+                    'unprocessed' => $unprocessedCount,
+                ]
+            ], 403);
+        }
+
+        // 🔥 Eliminación forzada
+        foreach ($folders as $folder) {
+            foreach ($folder->images as $image) {
+                $image->analysisResult()?->delete();
+                $image->processedImage()?->delete();
+                $image->delete();
+            }
+            $folder->delete();
+        }
+
         $project->delete();
 
-        return response()->json(['message' => 'Project deleted successfully']);
+        return response()->json(['message' => 'Proyecto y todo su contenido eliminado']);
     }
+
+
 
     public function getProcessingStatus(Project $project)
     {

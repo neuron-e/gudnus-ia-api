@@ -13,6 +13,11 @@ class ProcessedImage extends Model
         'corrected_path',
         'detection_path',
         'ai_response_json',
+        'error_edits_json',
+    ];
+
+    protected $casts = [
+        'error_edits_json' => 'array',
     ];
 
     public function image()

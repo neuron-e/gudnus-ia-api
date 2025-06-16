@@ -92,7 +92,7 @@ class ProcessBulkImagesJob implements ShouldQueue
 
         // ✅ Comprobación final del batch
         if ($batch && $batch->processed_images >= $batch->total_images) {
-            $batch->update(['status' => 'done']);
+            $batch->update(['status' => 'completed']);
             if ($this->notifyEmail) {
                 Mail::to($this->notifyEmail)->send(new ImagesProcessedMail($batch->total_images));
             }
