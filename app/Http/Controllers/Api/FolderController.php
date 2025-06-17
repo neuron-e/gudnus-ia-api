@@ -357,14 +357,17 @@ class FolderController extends Controller
             'processed' => 0,
             'unprocessed' => 0,
         ];
-
+        $skipped = [];
         DB::transaction(function () use ($ids, $project, $force, &$stats) {
             foreach ($ids as $id) {
-                $folder = Folder::with(['images', 'children.images', 'children.children'])->where('project_id', $project->id)->where('id', $id)->first();
+                $folder = Folder::with(['images', 'children.images', 'children.children'])
+                    ->where('project_id', $project->id)
+                    ->where('id', $id)->first();
 
                 if (!$folder) continue;
 
                 if (!$force && ($folder->images->isNotEmpty() || $folder->hasImagesInChildren())) {
+                    $skipped[] = $id;
                     continue; // Skipped folder with images
                 }
 
@@ -372,7 +375,11 @@ class FolderController extends Controller
             }
         });
 
-        return response()->json(['ok' => true, 'stats' => $stats]);
+        return response()->json([
+            'ok' => true,
+            'stats' => $stats,
+            'skipped' => $skipped,
+        ]);
     }
 
 
