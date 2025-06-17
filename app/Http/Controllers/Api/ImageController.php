@@ -76,9 +76,9 @@ class ImageController extends Controller
             return response()->json([
                 'ok' => false,
                 'image' => $image->fresh(['processedImage', 'analysisResult']),
-                'msg' => 'La imagen no se pudo procesar correctamente.',
+                'msg' => 'La imagen fue subida pero no pudo procesarse automáticamente. Puedes usar el recorte manual.',
                 'error' => 'processing_failed'
-            ], 500);
+            ], 200); // 👈 status 200 porque la subida fue OK, aunque no se procesó
         }
 
         // ✅ Imagen procesada correctamente
@@ -288,7 +288,7 @@ class ImageController extends Controller
 
         $image->update(['status' => 'processed']);
 
-        return response()->json(['ok' => true, 'path' => $relativeProcessed]);
+        return response()->json(['ok' => true,  'image' => $image->fresh(['processedImage'])]); // ⬅ devuelve con relación actualizada;
     }
 
     public function saveManualErrors(Request $request, $imageId)
