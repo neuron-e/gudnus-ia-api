@@ -21,3 +21,7 @@ yarn-error.log
 /.nova
 /.vscode
 /.zed
+
+# 👇 Añadido para permitir subir storage/scripts
+!storage/scripts/
+!storage/scripts/**
