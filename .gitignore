@@ -23,5 +23,5 @@ yarn-error.log
 /.zed
 
 # 👇 Añadido para permitir subir storage/scripts
-!storage/scripts/
-!storage/scripts/**
+!storage/app/scripts/
+!storage/app/scripts/**
