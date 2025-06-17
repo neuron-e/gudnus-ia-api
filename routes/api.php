@@ -44,8 +44,8 @@ Route::prefix('projects')->group(function () {
     Route::delete('/{project}/folders/{folder}/empty', [\App\Http\Controllers\Api\FolderController::class, 'empty']);
     Route::delete('/{project}/folders/{folder}', [\App\Http\Controllers\Api\FolderController::class, 'destroy']);
 
-    Route::post('/{project}/folders/empty-multiple', [\App\Http\Controllers\Api\FolderController::class, 'emptyMultiple']);
-    Route::post('/{project}/folders/delete-multiple', [\App\Http\Controllers\Api\FolderController::class, 'deleteMultiple']);
+    Route::post('/{project}/folders/bulk-empty', [\App\Http\Controllers\Api\FolderController::class, 'emptyMultiple']);
+    Route::post('/{project}/folders/bulk-delete', [\App\Http\Controllers\Api\FolderController::class, 'deleteMultiple']);
 
     Route::post('/{project}/images/bulk-upload', [App\Http\Controllers\Api\ImageController::class, 'uploadZipByModule']);
     Route::post('/{project}/images/zip-with-mapping', [App\Http\Controllers\Api\ImageController::class, 'uploadWithMapping']);

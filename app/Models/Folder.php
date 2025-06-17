@@ -158,7 +158,7 @@ class Folder extends Model
     /**
      * Verifica si alguna carpeta hija tiene imágenes
      */
-    private function hasImagesInChildren()
+    public function hasImagesInChildren()
     {
         foreach ($this->children as $child) {
             if ($child->images->isNotEmpty() || $child->hasImagesInChildren()) {
@@ -171,7 +171,7 @@ class Folder extends Model
     /**
      * Verifica si alguna carpeta hija tiene imágenes sin procesar
      */
-    private function hasUnprocessedImagesInChildren()
+    public function hasUnprocessedImagesInChildren()
     {
         foreach ($this->children as $child) {
             if ($child->has_unprocessed_images) {
@@ -184,7 +184,7 @@ class Folder extends Model
     /**
      * Verifica si alguna carpeta hija tiene imágenes con errores
      */
-    private function hasErrorImagesInChildren()
+    public function hasErrorImagesInChildren()
     {
         foreach ($this->children as $child) {
             if ($child->has_error_images) {
