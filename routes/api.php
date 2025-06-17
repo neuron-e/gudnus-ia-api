@@ -34,9 +34,8 @@ Route::middleware('auth:sanctum')->post('/logout', function (Request $request) {
     $request->user()->currentAccessToken()->delete();
     return response()->json(['message' => 'Sesión cerrada']);
 });
+Route::apiResource('projects', \App\Http\Controllers\Api\ProjectController::class)->parameters(['' => 'project']);
 Route::prefix('projects')->group(function () {
-    Route::apiResource('/', \App\Http\Controllers\Api\ProjectController::class)->parameters(['' => 'project']);
-
     Route::get('/{project}/folders', [\App\Http\Controllers\Api\FolderController::class, 'index']);
     Route::post('/{project}/folders', [\App\Http\Controllers\Api\FolderController::class, 'store']);
     Route::put('/{project}/folders/{folder}', [\App\Http\Controllers\Api\FolderController::class, 'update']);
