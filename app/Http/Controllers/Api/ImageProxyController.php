@@ -19,7 +19,7 @@ class ImageProxyController extends Controller
         $height = $request->integer('height');
         $fit = $request->query('fit', 'contain');
 
-        if (!$path || !Str::endsWith($path, ['.jpg', '.jpeg', '.png'])) {
+        if (!$path || !Str::endsWith(Str::lower($path), ['.jpg', '.jpeg', '.png'])) {
             return response()->json(['error' => 'Ruta inválida'], 422);
         }
 
@@ -64,8 +64,12 @@ class ImageProxyController extends Controller
         }
 
         // Imagen original
-        return response($disk->get($path), 200, [
-            'Content-Type' => $disk->mimeType($path)
+        return response()->stream(function () use ($disk, $path) {
+            $stream = $disk->readStream($path);
+            fpassthru($stream);
+        }, 200, [
+            'Content-Type' => $disk->mimeType($path),
+            'Content-Disposition' => 'inline; filename="' . basename($path) . '"',
         ]);
     }
 }

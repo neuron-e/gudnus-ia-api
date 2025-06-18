@@ -54,6 +54,23 @@ def encontrar_contorno_valido(contornos, img_shape):
         return None
     return max(contornos_validos, key=cv2.contourArea)
 
+def recorte_razonable(warped, original_shape):
+    h, w = warped.shape[:2]
+    H, W = original_shape[:2]
+
+    if w < 100 or h < 100:
+        return False  # Demasiado pequeño
+
+    area_ratio = (h * w) / (H * W)
+    if area_ratio < 0.2:
+        return False  # Panel muy pequeño
+
+    aspect_ratio = h / w
+    if aspect_ratio < 0.8 or aspect_ratio > 2.5:
+        return False  # Proporción rara (demasiado horizontal o vertical)
+
+    return True
+
 def process_image(input_path, output_path, filas=10, columnas=6):
     # Leer la imagen original
     img = cv2.imread(input_path)
@@ -64,11 +81,6 @@ def process_image(input_path, output_path, filas=10, columnas=6):
     es_inutilizable, mensaje = es_imagen_totalmente_inutilizable(img)
     if es_inutilizable:
         raise Exception(f"Imagen no procesable: {mensaje}")
-
-    # Calcular métricas de calidad
-    integridad = calcular_integridad(img)
-    luminosidad = calcular_luminosidad(img)
-    uniformidad = calcular_uniformidad(img)
 
     # Hacer una copia para la detección
     img_proc = img.copy()
@@ -123,7 +135,7 @@ def process_image(input_path, output_path, filas=10, columnas=6):
     # ESTRATEGIA 2: Método de umbralización global (para imágenes de contraste medio)
     except Exception as e:
         try:
-            print(f"Método 1 falló: {str(e)}. Intentando método 2...")
+            print(f"Método 1 falló: {str(e)}. Intentando método 2...", file=sys.stderr)
 
             # Mejorar contraste
             img_enhanced = cv2.convertScaleAbs(img, alpha=1.3, beta=15)
@@ -179,7 +191,7 @@ def process_image(input_path, output_path, filas=10, columnas=6):
 
         # ESTRATEGIA 3: Método de recorte directo (último recurso)
         except Exception as e:
-            print(f"Método 2 falló: {str(e)}. Intentando método 3...")
+            print(f"Método 2 falló: {str(e)}. Intentando método 3...", file=sys.stderr)
 
             # Umbralización simple pero con umbral muy bajo
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -205,6 +217,43 @@ def process_image(input_path, output_path, filas=10, columnas=6):
             # Recortar directamente
             warped = img[y_min:y_max, x_min:x_max]
 
+
+    # ESTRATEGIA 3.5: Ajuste por contorno si el recorte actual no es razonable
+    try:
+        if 'warped' not in locals() or not recorte_razonable(warped, img.shape):
+            print("⚠️ Aplicando estrategia 3.5", file=sys.stderr)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            _, binary = cv2.threshold(gray, 30, 255, cv2.THRESH_BINARY)
+
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                cnt = max(contours, key=cv2.contourArea)
+                x, y, w, h = cv2.boundingRect(cnt)
+
+                if w > img.shape[1] * 0.3 and h > img.shape[0] * 0.3:
+                    margin = 10
+                    x_min = max(0, x - margin)
+                    y_min = max(0, y - margin)
+                    x_max = min(img.shape[1] - 1, x + w + margin)
+                    y_max = min(img.shape[0] - 1, y + h + margin)
+                    warped = img[y_min:y_max, x_min:x_max]
+    except Exception as e:
+        print(f"Estrategia 3.5 falló: {e}", file=sys.stderr)
+
+    # Recorte adicional para eliminar márgenes negros, solo si tiene sentido
+    try:
+        if 'warped' in locals() and recorte_razonable(warped, img.shape):
+            gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+            _, mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
+            y_coords, x_coords = np.where(mask > 0)
+
+            if len(x_coords) > 0 and len(y_coords) > 0:
+                x_min, x_max = np.min(x_coords), np.max(x_coords)
+                y_min, y_max = np.min(y_coords), np.max(y_coords)
+                warped = warped[y_min:y_max+1, x_min:x_max+1]
+    except Exception as e:
+        print(f"⚠️ Post-recorte fino falló: {e}", file=sys.stderr)
+
     # Mejorar la imagen resultante
     hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
     hsv[:, :, 2] = cv2.add(hsv[:, :, 2], 30)  # Aumentar brillo
@@ -215,6 +264,11 @@ def process_image(input_path, output_path, filas=10, columnas=6):
     # Guardar y devolver resultados
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     cv2.imwrite(output_path, result)
+
+    # Calcular métricas del panel ya recortado
+    integridad = calcular_integridad(warped)
+    luminosidad = calcular_luminosidad(warped)
+    uniformidad = calcular_uniformidad(warped)
 
     result_dict = {
         "integridad": float(integridad),

@@ -56,8 +56,9 @@ class AnalysisBatchController extends Controller
             ]);
         }
 
+        $totalDone = $batch->processed + $batch->errors;
         $progress = $batch->total > 0
-            ? round(($batch->processed / $batch->total) * 100)
+            ? round(($totalDone / $batch->total) * 100)
             : 0;
 
         // ✅ Marcar como completado si ha terminado

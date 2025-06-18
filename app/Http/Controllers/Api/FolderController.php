@@ -279,7 +279,7 @@ class FolderController extends Controller
             return response()->json(['error' => 'La carpeta no pertenece a este proyecto.'], 403);
         }
 
-        $force = $request->query('force', false);
+        $force = $request->input('force', false);
 
         $folder->load(['images', 'children.images', 'children.children']);
 
@@ -325,7 +325,9 @@ class FolderController extends Controller
 
         DB::transaction(function () use ($ids, $project, &$stats) {
             foreach ($ids as $id) {
-                $folder = Folder::where('project_id', $project->id)->where('id', $id)->first();
+                $folder = Folder::with('images')
+                    ->where('project_id', $project->id)->where('id', $id)->first();
+
                 if ($folder) {
                     foreach ($folder->images as $image) {
                         if ($image->processedImage) $stats['processed']++;
@@ -345,7 +347,7 @@ class FolderController extends Controller
     public function deleteMultiple(Request $request, Project $project)
     {
         $ids = $request->input('ids', []);
-        $force = $request->query('force', false);
+        $force = $request->input('force', false);
 
         if (!is_array($ids)) {
             return response()->json(['error' => 'Formato inválido'], 422);
@@ -358,7 +360,7 @@ class FolderController extends Controller
             'unprocessed' => 0,
         ];
         $skipped = [];
-        DB::transaction(function () use ($ids, $project, $force, &$stats) {
+        DB::transaction(function () use ($ids, $project, $force, &$stats, &$skipped) {
             foreach ($ids as $id) {
                 $folder = Folder::with(['images', 'children.images', 'children.children'])
                     ->where('project_id', $project->id)

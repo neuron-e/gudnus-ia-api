@@ -27,6 +27,21 @@ class ProcessImageImmediatelyJob implements ShouldQueue
         $image = Image::find($this->imageId);
         if (!$image) return;
 
-        app(\App\Services\ImageProcessingService::class)->process($image);
+        app(\App\Services\ImageProcessingService::class)->process($image, $this->batchId);
+    }
+
+    public function failed(\Throwable $exception): void
+    {
+        Log::error("❌ El procesamiento de imagen ID {$this->imageId} falló: " . $exception->getMessage());
+
+        if ($this->batchId) {
+            $batch = \App\Models\ImageBatch::find($this->batchId);
+            if ($batch) {
+                $batch->increment('errors');
+                $batch->update([
+                    'error_messages' => array_merge($batch->error_messages ?? [], [$exception->getMessage()])
+                ]);
+            }
+        }
     }
 }

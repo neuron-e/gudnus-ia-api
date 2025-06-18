@@ -197,15 +197,27 @@ class Folder extends Model
 
     public function storeImage(string $binary, string $originalName): Image
     {
-        $filename = uniqid() . '_' . Str::slug(pathinfo($originalName, PATHINFO_FILENAME)) . '.' . pathinfo($originalName, PATHINFO_EXTENSION);
-        $path = "projects/{$this->project_id}/images/" . $filename;
+        // Crear archivo temporal para simular una subida real
+        $tmpPath = tempnam(sys_get_temp_dir(), 'img_');
+        file_put_contents($tmpPath, $binary);
 
-        Storage::disk('wasabi')->put($path, $binary);
+        // Crear instancia de UploadedFile
+        $uploaded = new \Illuminate\Http\UploadedFile(
+            $tmpPath,
+            $originalName,
+            null,
+            null,
+            true // <- mark as test
+        );
+
+
+        // Guardar en Wasabi con el mismo método que la subida manual
+        $path = $uploaded->store("projects/{$this->project_id}/images", ['disk' => 'wasabi', 'visibility' => 'public']);
 
         return Image::create([
             'folder_id' => $this->id,
             'project_id' => $this->project_id,
-            'filename' => $filename,
+            'filename' => basename($path),
             'original_path' => $path,
         ]);
     }

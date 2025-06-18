@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Jobs\HandleZipMappingJob;
 use App\Models\AnalysisBatch;
 use App\Models\Folder;
 use App\Models\Image;
@@ -163,7 +164,6 @@ class ImageController extends Controller
             'mapping' => 'required|json',
         ]);
 
-
         $mapping = json_decode($request->input('mapping'), true);
         if (!is_array($mapping)) {
             return response()->json(['error' => 'Formato de mapping inválido'], 422);
@@ -192,9 +192,6 @@ class ImageController extends Controller
             }
         }
 
-        $asignadas = 0;
-        $errors = [];
-
         $batch = ImageBatch::create([
             'project_id' => $project->id,
             'type' => 'zip-mapping',
@@ -202,44 +199,12 @@ class ImageController extends Controller
             'status' => 'processing',
         ]);
 
-
-        foreach ($mapping as $asignacion) {
-            $nombreImagen = basename($asignacion['imagen']);
-            $moduloPath = trim($asignacion['modulo']);
-
-            $fullImagePath = $path . '/' . $nombreImagen;
-            if (!file_exists($fullImagePath)) {
-                $errors[] = "No se encontró la imagen: $nombreImagen";
-                continue;
-            }
-
-            $folder = Folder::where('project_id', $project->id)
-                ->where('full_path', $moduloPath)
-                ->first();
-
-            if (!$folder) {
-                $errors[] = "No se encontró el módulo para: $moduloPath";
-                continue;
-            }
-
-            try {
-                $image = $folder->storeImage(file_get_contents($fullImagePath), $nombreImagen);
-                dispatch(new \App\Jobs\ProcessImageImmediatelyJob($image->id, $batch->id));
-                $asignadas++;
-            } catch (\Exception $e) {
-                Log::error("Error asignando imagen $nombreImagen al módulo $moduloPath: " . $e->getMessage());
-                $batch->increment('errors');
-                $batch->update(['error_messages' => array_merge($batch->error_messages ?? [], [$e->getMessage()])]);
-                $errors[] = "Error interno al asignar imagen: $nombreImagen";
-            }
-        }
-
-        File::deleteDirectory($path);
+        dispatch(new HandleZipMappingJob($project->id, $mapping, $path, $batch->id));
 
         return response()->json([
             'ok' => true,
-            'msg' => "Se asignaron $asignadas imágenes." . (count($errors) ? " Errores: " . count($errors) : ""),
-            'errores' => $errors,
+            'msg' => 'ZIP recibido correctamente. Se está procesando en segundo plano...',
+            'batch_id' => $batch->id,
         ]);
     }
 
