@@ -70,7 +70,7 @@
 
         .footer:before {
             counter-increment: page;
-            content: "Informe generado el {{ Carbon::now()->format('d/m/Y \a \l\a\s H:i') }} | Página {PAGE_NUM}"
+            content: "Informe generado el {{ now()->format('d/m/Y \a \l\a\s H:i') }} | Página {PAGE_NUM}"
         }
 
         /* Portada */
