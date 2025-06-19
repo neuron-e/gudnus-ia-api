@@ -35,7 +35,7 @@ class ProcessBulkImagesJob implements ShouldQueue
             $image = $processed->image;
             $wasabiDisk = Storage::disk('wasabi');
 
-            if (!$wasabiDisk->exists($processed->corrected_path)) continue;
+            if (!$processed->corrected_path || !$wasabiDisk->exists($processed->corrected_path)) continue;
 
             // Descargar temporalmente
             $tempPath = storage_path('app/tmp/' . uniqid('wasabi_', true) . '.jpg');
