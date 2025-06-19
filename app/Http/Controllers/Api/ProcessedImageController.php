@@ -109,6 +109,7 @@ class ProcessedImageController extends Controller
 
         $images = ProcessedImage::whereIn('image_id', $request->image_ids)
             ->whereNull('ai_response_json')
+            ->whereNotNull('corrected_path')
             ->get();
 
         if ($images->isEmpty()) {
