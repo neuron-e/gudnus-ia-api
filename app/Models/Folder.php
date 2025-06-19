@@ -26,6 +26,11 @@ class Folder extends Model
         });
     }
 
+    public function allImagesRecursive()
+    {
+        return collect($this->images)->merge($this->children->flatMap->allImagesRecursive());
+    }
+
     /**
      * Estado básico de la carpeta actual (solo considera imágenes directas)
      */

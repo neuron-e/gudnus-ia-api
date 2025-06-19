@@ -17,6 +17,10 @@ use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Intervention\Image\Geometry\Rectangle;
+use Intervention\Image\ImageManager;
+use Intervention\Image\Drivers\Imagick\Driver as ImagickDriver;
+use Intervention\Image\Typography\Font;
 
 class ImageController extends Controller
 {
@@ -90,6 +94,151 @@ class ImageController extends Controller
             'error' => null,
         ]);
     }
+
+    public function generateAnalyzedImage($correctedPath, $aiResponseJson): string|null
+    {
+        $wasabi = Storage::disk('wasabi');
+        if (!$wasabi->exists($correctedPath)) return null;
+
+        $imageData = $wasabi->get($correctedPath);
+        $manager = new ImageManager(new ImagickDriver());
+        /** @var \Intervention\Image\Image $image */
+        $image = $manager->read($imageData);
+
+        // === Interpretar JSON ===
+        $parsed = json_decode($aiResponseJson, true);
+        if (!$parsed) return null;
+
+        $predictions = $parsed['final'] ?? ($parsed['predictions'] ?? []);
+        $minProbability = $parsed['minProbability'] ?? 0.5;
+
+        // === Colores por tipo ===
+        $errorColors = [
+            'Intensidad' => '#FFA500',
+            'Fingers' => '#00BFFF',
+            'Black Edges' => '#333333',
+            'Microgrietas' => '#FF0000',
+        ];
+
+        foreach ($predictions as $prediction) {
+            // Saltar si la probabilidad es menor
+            if (isset($prediction['probability']) && $prediction['probability'] < $minProbability) {
+                continue;
+            }
+
+            $box = $prediction['boundingBox'];
+            $left = (int) ($box['left'] * $image->width());
+            $top = (int) ($box['top'] * $image->height());
+            $width = (int) ($box['width'] * $image->width());
+            $height = (int) ($box['height'] * $image->height());
+
+            $tag = $prediction['tagName'] ?? '';
+            $color = $errorColors[$tag] ?? '#FFFFFF';
+            $label = sprintf('%s (%.1f%%)', $tag, $prediction['probability'] * 100);
+
+            // Rectángulo
+            $rectangle = new Rectangle($width, $height);
+            $rectangle->setBackgroundColor('transparent');
+            $rectangle->setBorder($color, 2);
+            $image->drawRectangle($left, $top, $rectangle);
+
+            // Texto: blanco, más pequeño
+            $font = new Font(resource_path('fonts/Inter_24pt-Regular.ttf'));
+            $font->setColor('#FFFFFF');
+            $font->setSize(14);
+            $image->text($label, $left, $top - 12, $font);
+        }
+
+        $tmpPath = storage_path('app/tmp/' . uniqid('analyzed_') . '.jpg');
+        $image->toJpeg()->save($tmpPath, 90);
+
+        return $tmpPath;
+    }
+
+    private function getFolderPathForZip($folder, $foldersById): string
+    {
+        $path = [];
+
+        while ($folder) {
+            $name = str_replace(['/', '\\'], '-', $folder->name); // evitar conflictos en el ZIP
+            $path[] = $name;
+            $folder = $foldersById[$folder->parent_id] ?? null;
+        }
+
+        return implode('/', array_reverse($path));
+    }
+
+
+    public function downloadImages(Project $project, Request $request)
+    {
+        $type = $request->query('type'); // original | processed | analyzed | all
+
+        $images = Image::with(['processedImage', 'folder'])
+            ->whereHas('folder', fn($q) => $q->where('project_id', $project->id))
+            ->get();
+
+        $folders = Folder::where('project_id', $project->id)->get()->keyBy('id');
+
+        $root = Str::slug($project->name, '_');
+
+        if ($images->isEmpty()) {
+            return response()->json(['error' => 'No hay imágenes para exportar'], 404);
+        }
+
+        $zipName = "export_images_project_{$project->id}_" . now()->format('Ymd_His') . ".zip";
+        $zipPath = storage_path("app/tmp/$zipName");
+
+        $zip = new \ZipArchive;
+        if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+            return response()->json(['error' => 'No se pudo crear el archivo ZIP'], 500);
+        }
+
+        $wasabi = Storage::disk('wasabi');
+
+        foreach ($images as $img) {
+            $folderPath = $this->getFolderPathForZip($img->folder, $folders);
+            $baseName = pathinfo($img->filename ?? 'image', PATHINFO_FILENAME) ?: 'imagen';
+
+            if (in_array($type, ['original', 'all']) && $wasabi->exists($img->original_path)) {
+                $filename = "{$baseName}_original.jpg";
+                $zip->addFromString("{$root}/{$folderPath}/original/{$filename}", $wasabi->get($img->original_path));
+            }
+
+            if ($img->processedImage && $wasabi->exists($img->processedImage->corrected_path)) {
+                if (in_array($type, ['processed', 'all'])) {
+                    $filename = "{$baseName}_processed.jpg";
+                    $zip->addFromString("{$root}/{$folderPath}/processed/{$filename}", $wasabi->get($img->processedImage->corrected_path));
+                }
+
+                // Analyzed (solo si hay JSON)
+                if (in_array($type, ['analyzed', 'all']) && $img->processedImage->ai_response_json) {
+                    $jsonToUse = $img->processedImage->error_edits_json ?: $img->processedImage->ai_response_json;
+
+                    $analyzedImagePath = $this->generateAnalyzedImage(
+                        $img->processedImage->corrected_path,
+                        $jsonToUse
+                    );
+
+                    if ($analyzedImagePath && file_exists($analyzedImagePath)) {
+                        $filename = "{$baseName}_analyzed.jpg";
+                        $zip->addFile($analyzedImagePath, "{$root}/{$folderPath}/analyzed/{$filename}");
+                    }
+                }
+            }
+        }
+
+        $zip->close();
+
+        // Borrar archivos temporales analizados
+        $files = glob(storage_path('app/tmp/analyzed_*.jpg'));
+        foreach ($files as $file) {
+            @unlink($file);
+        }
+
+
+        return response()->download($zipPath)->deleteFileAfterSend(true);
+    }
+
 
     public function uploadZipByModule(Request $request, Project $project)
     {

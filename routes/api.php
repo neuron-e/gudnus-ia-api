@@ -36,6 +36,9 @@ Route::middleware('auth:sanctum')->post('/logout', function (Request $request) {
 });
 Route::apiResource('projects', \App\Http\Controllers\Api\ProjectController::class)->parameters(['' => 'project']);
 Route::prefix('projects')->group(function () {
+    Route::post('/{project}/generate-basic-structure', [\App\Http\Controllers\Api\FolderController::class, 'generateBasicStructure']);
+    Route::get('/{project}/generate-report', [\App\Http\Controllers\Api\ProjectController::class, 'generateReport']);
+
     Route::get('/{project}/folders', [\App\Http\Controllers\Api\FolderController::class, 'index']);
     Route::post('/{project}/folders', [\App\Http\Controllers\Api\FolderController::class, 'store']);
     Route::put('/{project}/folders/{folder}', [\App\Http\Controllers\Api\FolderController::class, 'update']);
@@ -48,6 +51,7 @@ Route::prefix('projects')->group(function () {
 
     Route::post('/{project}/images/bulk-upload', [App\Http\Controllers\Api\ImageController::class, 'uploadZipByModule']);
     Route::post('/{project}/images/zip-with-mapping', [App\Http\Controllers\Api\ImageController::class, 'uploadWithMapping']);
+    Route::get('/{project}/download-images', [App\Http\Controllers\Api\ImageController::class, 'downloadImages']);
 
     Route::get('/{project}/processing-status', [\App\Http\Controllers\Api\ProjectController::class, 'getProcessingStatus']);
 

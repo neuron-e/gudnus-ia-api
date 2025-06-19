@@ -77,6 +77,11 @@ def process_image(input_path, output_path, filas=10, columnas=6):
     if img is None:
         raise Exception(f"No se pudo cargar la imagen: {input_path}")
 
+    # 👉 ROTACIÓN AUTOMÁTICA si es horizontal
+    h, w = img.shape[:2]
+    if w > h:
+        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+
     # Verificar si la imagen es procesable
     es_inutilizable, mensaje = es_imagen_totalmente_inutilizable(img)
     if es_inutilizable:

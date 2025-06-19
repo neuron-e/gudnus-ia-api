@@ -243,6 +243,32 @@ class FolderController extends Controller
         }
     }
 
+    public function generateBasicStructure(Project $project, Request $request): \Illuminate\Http\JsonResponse
+    {
+        $modules = (int) $request->get('modules', 0);
+
+        if ($modules < 1) {
+            return response()->json(['error' => 'Número inválido de módulos'], 400);
+        }
+
+        $created = [];
+
+        for ($i = 1; $i <= $modules; $i++) {
+            $folder = Folder::create([
+                'project_id' => $project->id,
+                'parent_id' => null, // puedes ajustar si hay una jerarquía
+                'name' => "Módulo {$i}",
+                'type' => 'modulo', // si usas el campo type
+            ]);
+            $created[] = $folder;
+        }
+
+        return response()->json([
+            'ok' => true,
+            'created' => $created
+        ]);
+    }
+
     /**
      * Display the specified resource.
      */

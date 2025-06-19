@@ -6,9 +6,16 @@ use App\Http\Controllers\Controller;
 use App\Models\Folder;
 use App\Models\Image;
 use App\Models\ImageBatch;
+use App\Models\ProcessedImage;
 use App\Models\Project;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
+use Intervention\Image\Drivers\Imagick\Driver as ImagickDriver;
+use Intervention\Image\Geometry\Rectangle;
+use Intervention\Image\ImageManager;
+use Intervention\Image\Typography\Font;
 
 class ProjectController extends Controller
 {
@@ -171,6 +178,165 @@ class ProjectController extends Controller
         $project->delete();
 
         return response()->json(['message' => 'Proyecto y todo su contenido eliminado']);
+    }
+
+    public function generateReport(Project $project)
+    {
+        // Cargar estructura completa del proyecto
+        $rootFolders = Folder::where('project_id', $project->id)
+            ->whereNull('parent_id')
+            ->with('images.processedImage')
+            ->get();
+
+        $project->children = $rootFolders;
+        foreach ($rootFolders as $folder) {
+            $this->loadChildrenRecursive($folder);
+        }
+
+        // Recoger todas las imágenes procesadas
+        $allImages = collect();
+        $this->collectImagesRecursive($project->children, $allImages);
+
+        // CRÍTICO: Solo imágenes que realmente tienen ProcessedImage
+        $imagesWithProcessed = $allImages->filter(function ($img) {
+            return $img->processedImage !== null;
+        });
+
+        // Generar imágenes analizadas para TODAS las imágenes (con y sin errores)
+        $analyzedPaths = $imagesWithProcessed->map(function ($img, $index) {
+            return $this->generateAnalyzedImageBase64($img->processedImage);
+        })->filter();
+
+        // Configurar DomPDF con opciones optimizadas
+        $pdf = Pdf::loadView('pdf.project_report_calude', [
+            'project' => $project,
+            'images' => $imagesWithProcessed, // Usar todas las imágenes procesadas
+            'analyzedPaths' => $analyzedPaths->values(),
+        ]);
+
+        // Configuraciones para mejor compatibilidad con DomPDF
+        $pdf->setPaper('a4', 'portrait')
+            ->setOptions([
+                'isHtml5ParserEnabled' => true,
+                'isPhpEnabled' => true,
+                'isRemoteEnabled' => true,
+                'defaultFont' => 'Arial',
+                'dpi' => 96,
+                'defaultPaperSize' => 'a4',
+                'fontHeightRatio' => 1.0,
+                'isJavascriptEnabled' => false,
+                'debugKeepTemp' => false,
+                'debugCss' => false,
+                'debugLayout' => false,
+                'debugLayoutLines' => false,
+                'debugLayoutBlocks' => false,
+                'debugLayoutInline' => false,
+                'debugLayoutPaddingBox' => false,
+            ]);
+
+        return $pdf->download("informe-electroluminiscencia-{$project->name}-" . now()->format('Y-m-d') . ".pdf");
+    }
+
+    private function collectImagesRecursive($folders, &$allImages)
+    {
+        foreach ($folders as $folder) {
+            if ($folder->images) {
+                foreach ($folder->images as $img) {
+                    $allImages->push($img);
+                }
+            }
+            if ($folder->children) {
+                $this->collectImagesRecursive($folder->children, $allImages);
+            }
+        }
+    }
+
+    private function generateAnalyzedImageBase64(ProcessedImage $processed): ?string
+    {
+        $wasabi = Storage::disk('wasabi');
+        if (!$wasabi->exists($processed->corrected_path)) return null;
+
+        $imageData = $wasabi->get($processed->corrected_path);
+        $manager = new ImageManager(new ImagickDriver());
+        $image = $manager->read($imageData);
+
+        // CRÍTICO: Usar exactamente la misma lógica de filtrado que en el template
+        $json = $processed->error_edits_json ?: $processed->ai_response_json;
+        $prob = $processed->min_probability ?? 0.5;
+        $response = json_decode($json, true);
+
+        if (!isset($response['predictions'])) return null;
+
+        // Aplicar exactamente el mismo filtro que en el Blade template
+        $filteredPredictions = array_filter($response['predictions'], function($prediction) use ($prob) {
+            return !isset($prediction['probability']) || $prediction['probability'] >= $prob;
+        });
+
+        // Colores mejorados para mejor visibilidad en PDF
+        $errorColors = [
+            'Intensidad' => '#FFA500',      // Naranja
+            'Fingers' => '#00BFFF',         // Azul cielo
+            'Black Edges' => '#FF0000',     // Rojo
+            'Microgrietas' => '#8A2BE2',    // Violeta
+            'Defectos' => '#32CD32',        // Verde lima
+            'Soldadura' => '#FF69B4',       // Rosa
+            'Celdas dañadas' => '#FF0000',  // Rojo para celdas dañadas
+        ];
+
+        // Solo dibujar las predicciones filtradas
+        foreach ($filteredPredictions as $prediction) {
+            $box = $prediction['boundingBox'];
+            $left = (int) ($box['left'] * $image->width());
+            $top = (int) ($box['top'] * $image->height());
+            $width = (int) ($box['width'] * $image->width());
+            $height = (int) ($box['height'] * $image->height());
+
+            $tag = $prediction['tagName'] ?? '';
+            $color = $errorColors[$tag] ?? '#FFFFFF';
+            $label = sprintf('%s (%.1f%%)', $tag, ($prediction['probability'] ?? 0) * 100);
+
+            // Rectángulo con grosor mejorado para PDF
+            $rectangle = new Rectangle($width, $height);
+            $rectangle->setBackgroundColor('rgba(0,0,0,0.1)'); // Fondo semi-transparente mejorado
+            $rectangle->setBorder($color, 3); // Grosor aumentado para mejor visibilidad
+            $image->drawRectangle($left, $top, $rectangle);
+
+            // Texto con fondo para mejor legibilidad
+            try {
+                $font = new Font(resource_path('fonts/Inter_24pt-Regular.ttf'));
+                $font->setColor('#FFFFFF');
+                $font->setSize(16); // Tamaño aumentado
+
+                // Agregar fondo semi-transparente al texto
+                $textBg = new Rectangle(strlen($label) * 8, 20);
+                $textBg->setBackgroundColor($color);
+                $image->drawRectangle($left, max(0, $top - 25), $textBg);
+
+                $image->text($label, $left + 2, max(10, $top - 8), $font);
+            } catch (\Exception $e) {
+                // Fallback si no encuentra la fuente
+                $image->text($label, $left + 2, max(10, $top - 8), function($font) {
+                    $font->color('#FFFFFF');
+                    $font->size(14);
+                });
+            }
+        }
+
+        $encoded = (string) $image->toJpeg(85); // Calidad mejorada para PDF
+        return 'data:image/jpeg;base64,' . base64_encode($encoded);
+    }
+
+    private function getBase64FromWasabi(string $path): ?string
+    {
+        $wasabi = Storage::disk('wasabi');
+        if (!$wasabi->exists($path)) return null;
+
+        $data = $wasabi->get($path);
+
+        $finfo = new \finfo(FILEINFO_MIME_TYPE);
+        $mime = $finfo->buffer($data) ?? 'image/jpeg';
+
+        return 'data:' . $mime . ';base64,' . base64_encode($data);
     }
 
 
