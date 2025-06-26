@@ -77,8 +77,19 @@ Route::post('/images/{image}/manual-errors', [App\Http\Controllers\Api\ImageCont
 Route::post('/images/{image}/status-processed', [App\Http\Controllers\Api\ImageController::class, 'imageProcessedStatus']);
 Route::post('/images/{image}/status-analysis', [App\Http\Controllers\Api\ImageController::class, 'imageAnalysisStatus']);
 
-
 Route::get('/projects/{project}/processing-status', [AnalysisBatchController::class, 'processingStatus']);
 Route::get('/projects/{project}/processing-status-image', [AnalysisBatchController::class, 'processingStatusImage']);
 
+// ✅ Nuevas rutas para manejo de batches colgados
+Route::get('/projects/{project}/batches', [AnalysisBatchController::class, 'getProjectBatches']);
+Route::post('/projects/{project}/retry-pending-images', [AnalysisBatchController::class, 'retryPendingImages']);
+Route::post('/projects/{project}/retry-pending-analysis', [AnalysisBatchController::class, 'retryPendingAnalysis']);
+Route::post('/projects/{project}/force-clean', [AnalysisBatchController::class, 'forceCleanProject']); // ✅ NUEVO
 
+// Rutas para batches específicos - con parámetro de tipo
+Route::get('/batches/{batchId}/details/{type}', [AnalysisBatchController::class, 'getBatchDetails']);
+Route::put('/batches/{batchId}/force-complete/{type}', [AnalysisBatchController::class, 'forceCompleteBatch']);
+Route::put('/batches/{batchId}/cancel/{type}', [AnalysisBatchController::class, 'cancelBatch']);
+
+// Limpieza general
+Route::post('/batches/cleanup', [AnalysisBatchController::class, 'cleanupOldBatches']);
