@@ -159,7 +159,7 @@ class ImageProcessingService
             // Guardar datos
             $processed = $image->processedImage ?? new ProcessedImage();
             $processed->corrected_path = $wasabiProcessedPath;
-            $processed->status = 'completed'; // ✅ Marcar como completado
+         //   $processed->status = 'completed'; // ✅ Marcar como completado
             $image->processedImage()->save($processed);
 
             $analysis = $image->analysisResult ?? new ImageAnalysisResult();

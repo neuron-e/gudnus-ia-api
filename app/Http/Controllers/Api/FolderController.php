@@ -351,17 +351,19 @@ class FolderController extends Controller
 
         DB::transaction(function () use ($ids, $project, &$stats) {
             foreach ($ids as $id) {
-                $folder = Folder::with('images')
-                    ->where('project_id', $project->id)->where('id', $id)->first();
+                // ✅ Cargar carpeta con todas sus relaciones (incluyendo subcarpetas)
+                $folder = Folder::with(['images.processedImage', 'images.analysisResult', 'children'])
+                    ->where('project_id', $project->id)
+                    ->where('id', $id)
+                    ->first();
 
                 if ($folder) {
-                    foreach ($folder->images as $image) {
-                        if ($image->processedImage) $stats['processed']++;
-                        else $stats['unprocessed']++;
+                    // ✅ Contar imágenes ANTES de eliminar (recursivamente)
+                    $this->countImagesRecursively($folder, $stats);
 
-                        $stats['images']++;
-                        $image->delete();
-                    }
+                    // ✅ Eliminar todas las imágenes recursivamente (usando el método que funciona)
+                    $this->deleteImagesRecursively($folder);
+
                     $stats['folders']++;
                 }
             }
@@ -370,6 +372,27 @@ class FolderController extends Controller
         return response()->json(['ok' => true, 'stats' => $stats]);
     }
 
+    /**
+     * ✅ NUEVO: Contar imágenes recursivamente antes de eliminar
+     */
+    private function countImagesRecursively(Folder $folder, array &$stats)
+    {
+        // Contar imágenes de esta carpeta
+        foreach ($folder->images as $image) {
+            $stats['images']++;
+
+            if ($image->processedImage && $image->processedImage->ai_response_json !== null) {
+                $stats['processed']++;
+            } else {
+                $stats['unprocessed']++;
+            }
+        }
+
+        // Contar imágenes de subcarpetas recursivamente
+        foreach ($folder->children as $child) {
+            $this->countImagesRecursively($child, $stats);
+        }
+    }
     public function deleteMultiple(Request $request, Project $project)
     {
         $ids = $request->input('ids', []);
