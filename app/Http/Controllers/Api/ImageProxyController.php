@@ -27,7 +27,7 @@ class ImageProxyController extends Controller
         $originalExists = $disk->exists($path);
 
         if (!$originalExists) {
-            return response()->file(public_path('images/fallback.jpg'));
+            return response()->file(public_path('images/fallback.png'));
         }
 
         if ($thumb && $width && $height) {
