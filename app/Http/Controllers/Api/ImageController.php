@@ -326,8 +326,10 @@ class ImageController extends Controller
         //$zipStoragePath = "temp_zips/{$zipFileName}";
 
         // Guardar ZIP en storage persistente
-        $zipPath = $file->storeAs('temp_zips', $zipFileName, 'local');
-        $fullZipPath = storage_path("app/{$zipPath}");
+        $destPath = storage_path("app/temp_zips/{$zipFileName}");
+        $request->file('zip')->move(storage_path('app/temp_zips'), $zipFileName);
+
+        $fullZipPath = $destPath;
 
         Log::info("📦 ZIP guardado en path persistente:", [
             'zip_path' => $fullZipPath,
