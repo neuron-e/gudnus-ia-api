@@ -345,7 +345,12 @@ class ImageController extends Controller
         ]);
 
         // ✅ Aquí estaba el error
-        dispatch(new HandleZipMappingJob($project->id, $mapping, $tempExtractPath, $batch->id));
+        dispatch(new HandleZipMappingJob(
+            $project->id,
+            $mapping,
+            $fullZipPath, // ✅ ESTE es el ZIP real
+            $batch->id
+        ));
 
         return response()->json([
             'ok' => true,
