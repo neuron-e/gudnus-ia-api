@@ -59,10 +59,10 @@ class AnalysisBatchController extends Controller
 
     public function processingStatusImage(Project $project)
     {
-        // ✅ Auto-limpiar batches muy antiguos (ajustado para lotes grandes)
+        // ✅ Auto-limpiar batches muy antiguos (8 horas)
         $veryOldBatches = ImageBatch::where('project_id', $project->id)
             ->whereIn('status', ['processing', 'pending'])
-            ->where('updated_at', '<', Carbon::now()->subHours(8))  // ✅ 8 horas para lotes muy grandes
+            ->where('updated_at', '<', Carbon::now()->subHours(8))
             ->get();
 
         foreach ($veryOldBatches as $oldBatch) {
@@ -70,25 +70,57 @@ class AnalysisBatchController extends Controller
             Log::warning("Auto-marcando batch {$oldBatch->id} como fallido por ser muy antiguo (8+ horas)");
         }
 
+        // ✅ CORREGIDO: Buscar batch más reciente con mejor logging
         $batch = ImageBatch::where('project_id', $project->id)
             ->whereIn('status', ['processing', 'pending'])
-            ->latest()
+            ->latest('id') // ✅ Ordenar por ID para asegurar el más reciente
             ->first();
 
         if (!$batch) {
+            Log::debug("No hay batches activos para proyecto {$project->id}");
             return response()->json([
                 'processing' => false,
                 'progress' => 100,
-                'batch_id' => null
+                'batch_id' => null,
+                'debug_info' => [
+                    'project_id' => $project->id,
+                    'timestamp' => now()->toISOString()
+                ]
             ]);
+        }
+
+        // ✅ Logging detallado para debug
+        Log::debug("Batch encontrado para proyecto {$project->id}", [
+            'batch_id' => $batch->id,
+            'status' => $batch->status,
+            'processed' => $batch->processed,
+            'total' => $batch->total,
+            'errors' => $batch->errors,
+            'updated_at' => $batch->updated_at,
+            'created_at' => $batch->created_at
+        ]);
+
+        // ✅ Verificar si hay múltiples batches activos (problema potencial)
+        $activeBatchesCount = ImageBatch::where('project_id', $project->id)
+            ->whereIn('status', ['processing', 'pending'])
+            ->count();
+
+        if ($activeBatchesCount > 1) {
+            Log::warning("⚠️ Se encontraron {$activeBatchesCount} batches activos para proyecto {$project->id}. Esto podría causar problemas.");
         }
 
         // ✅ Calcular tiempo límite basado en el tamaño del batch
         $expectedMinutes = $this->calculateExpectedProcessingTime($batch);
-        $isStuck = $batch->updated_at < Carbon::now()->subMinutes($expectedMinutes);
+        $minutesSinceUpdate = $batch->updated_at->diffInMinutes(now());
+        $isStuck = $minutesSinceUpdate > $expectedMinutes;
 
         if ($isStuck) {
-            Log::warning("ImageBatch {$batch->id} parece estar colgado. Tamaño: {$batch->total}, Tiempo esperado: {$expectedMinutes}min, Última actualización: {$batch->updated_at}");
+            Log::warning("ImageBatch {$batch->id} parece estar colgado", [
+                'batch_size' => $batch->total,
+                'expected_minutes' => $expectedMinutes,
+                'actual_minutes' => $minutesSinceUpdate,
+                'last_update' => $batch->updated_at
+            ]);
         }
 
         $totalDone = $batch->processed + ($batch->errors ?? 0);
@@ -96,16 +128,23 @@ class AnalysisBatchController extends Controller
             ? round(($totalDone / $batch->total) * 100)
             : 0;
 
-        // ✅ Marcar como completado si ha terminado
-        if ($progress >= 100) {
+        // ✅ CORREGIDO: Mejor detección de finalización
+        if ($totalDone >= $batch->total) {
             $finalStatus = ($batch->errors ?? 0) > 0 ? 'completed_with_errors' : 'completed';
             $batch->update(['status' => $finalStatus]);
+
+            Log::info("🎉 Batch {$batch->id} completado automáticamente: {$batch->processed} procesadas, {$batch->errors} errores");
 
             return response()->json([
                 'processing' => false,
                 'progress' => 100,
                 'batch_id' => null,
-                'completed_batch_id' => $batch->id
+                'completed_batch_id' => $batch->id,
+                'debug_info' => [
+                    'final_status' => $finalStatus,
+                    'total_processed' => $batch->processed,
+                    'total_errors' => $batch->errors ?? 0
+                ]
             ]);
         }
 
@@ -122,7 +161,11 @@ class AnalysisBatchController extends Controller
             'debug_info' => [
                 'batch_size' => $batch->total,
                 'expected_minutes' => $expectedMinutes,
-                'minutes_since_update' => $batch->updated_at->diffInMinutes(now())
+                'minutes_since_update' => $minutesSinceUpdate,
+                'active_batches_count' => $activeBatchesCount,
+                'total_done' => $totalDone,
+                'batch_created' => $batch->created_at->diffForHumans(),
+                'project_id' => $project->id
             ]
         ]);
     }

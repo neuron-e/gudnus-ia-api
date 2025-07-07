@@ -5,7 +5,7 @@ namespace App\Jobs;
 use App\Models\Folder;
 use App\Models\Image;
 use App\Models\ImageBatch;
-use App\Jobs\ProcessImageImmediatelyJob;
+use App\Services\ImageProcessingService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -19,6 +19,9 @@ class HandleZipMappingJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    public $timeout = 3600; // 1 hora para lotes grandes
+    public $tries = 2;
+
     public function __construct(
         public int $projectId,
         public array $mapping,
@@ -28,14 +31,8 @@ class HandleZipMappingJob implements ShouldQueue
 
     public function handle()
     {
-        // ✅ VERIFICACIÓN: Este log debe aparecer para confirmar que el código se está ejecutando
-        Log::info("🚀🚀🚀 CÓDIGO ACTUALIZADO SE ESTÁ EJECUTANDO - VERSIÓN 2.0 🚀🚀🚀");
-
         $batch = ImageBatch::find($this->batchId);
-        if (!$batch) {
-            Log::error("❌ No se encontró el batch: {$this->batchId}");
-            return;
-        }
+        if (!$batch) return;
 
         $asignadas = 0;
         $errores = 0;
@@ -43,60 +40,42 @@ class HandleZipMappingJob implements ShouldQueue
 
         try {
             $batch->update(['status' => 'processing']);
+            Log::info("🚀 Iniciando HandleZipMappingJob para batch {$this->batchId} con " . count($this->mapping) . " asignaciones");
 
-            Log::info("📊 Total entradas en mapping: " . count($this->mapping));
-
-            // ✅ Filtrar entradas con imagen null PRIMERO
-            $mappingConImagenes = array_filter($this->mapping, function($asignacion) {
-                return !empty($asignacion['imagen']) && $asignacion['imagen'] !== null;
-            });
-
-            Log::info("📊 Entradas con imágenes válidas: " . count($mappingConImagenes));
-            Log::info("📊 Entradas filtradas (sin imagen): " . (count($this->mapping) - count($mappingConImagenes)));
-
-            // ✅ CORREGIR: Actualizar el total del batch con el número real de imágenes
-            $batch->update(['total' => count($mappingConImagenes)]);
-
-            if (empty($mappingConImagenes)) {
-                throw new \Exception("No hay asignaciones con imágenes válidas para procesar");
-            }
-
-            // ✅ Mapear archivos disponibles en el ZIP
-            $archivosDisponibles = $this->obtenerArchivosDelZip($this->tempPath);
-
-            Log::info("📁 Archivos encontrados en ZIP: " . count($archivosDisponibles));
-            Log::info("📋 Archivos: " . implode(', ', array_keys($archivosDisponibles)));
-
-            // ✅ NUEVO: Verificar entorno de procesamiento de imágenes
-            $this->verificarEntornoProcesamiento();
-
-            foreach ($mappingConImagenes as $asignacion) {
-                $imagenPath = trim($asignacion['imagen']); // "BRUTOS/DSC00001.JPG"
-                $nombreImagen = basename($imagenPath); // "DSC00001.JPG"
+            foreach ($this->mapping as $index => $asignacion) {
+                $nombreImagen = basename($asignacion['imagen']);
                 $moduloPath = trim($asignacion['modulo']);
+                $fullImagePath = $this->tempPath . '/' . $nombreImagen;
 
-                Log::info("🔍 Procesando: $imagenPath -> $moduloPath");
+                // ✅ Logging detallado para debug
+                Log::debug("Procesando asignación {$index}: {$nombreImagen} -> {$moduloPath}");
 
-                // ✅ Buscar el archivo de imagen
-                $archivoEncontrado = $this->buscarArchivo($imagenPath, $nombreImagen, $archivosDisponibles);
-
-                if (!$archivoEncontrado) {
-                    $errorMessages[] = "No se encontró la imagen: $nombreImagen (buscada como: $imagenPath)";
+                // Verificaciones de archivo
+                if (!file_exists($fullImagePath)) {
+                    $errorMessages[] = "No se encontró la imagen: $nombreImagen";
                     $errores++;
                     continue;
                 }
 
-                Log::info("✅ Archivo encontrado: $archivoEncontrado");
-
-                // ✅ Verificar que es un archivo válido
-                if (!is_file($archivoEncontrado)) {
+                if (!is_file($fullImagePath)) {
                     $errorMessages[] = "El elemento '$nombreImagen' no es un archivo válido";
                     $errores++;
                     continue;
                 }
 
-                // ✅ Buscar la carpeta del módulo
-                $folder = $this->buscarCarpetaModulo($moduloPath);
+                // Verificar extensión
+                $extension = strtolower(pathinfo($fullImagePath, PATHINFO_EXTENSION));
+                $allowedExtensions = ['jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp'];
+                if (!in_array($extension, $allowedExtensions)) {
+                    $errorMessages[] = "El archivo '$nombreImagen' no tiene una extensión de imagen válida";
+                    $errores++;
+                    continue;
+                }
+
+                // Buscar carpeta
+                $folder = Folder::where('project_id', $this->projectId)
+                    ->where('full_path', $moduloPath)
+                    ->first();
 
                 if (!$folder) {
                     $errorMessages[] = "No se encontró el módulo para: $moduloPath";
@@ -104,71 +83,91 @@ class HandleZipMappingJob implements ShouldQueue
                     continue;
                 }
 
-                Log::info("✅ Módulo encontrado: {$folder->name} (ID: {$folder->id})");
+                // Eliminar imágenes existentes
+                foreach ($folder->images as $existing) {
+                    if (Storage::disk('wasabi')->exists($existing->original_path)) {
+                        Storage::disk('wasabi')->delete($existing->original_path);
+                    }
+                    if ($existing->processedImage && Storage::disk('wasabi')->exists($existing->processedImage->corrected_path)) {
+                        Storage::disk('wasabi')->delete($existing->processedImage->corrected_path);
+                    }
+
+                    $existing->processedImage()?->delete();
+                    $existing->analysisResult()?->delete();
+                    $existing->delete();
+                }
 
                 try {
-                    // Leer contenido de la imagen
-                    $imageContent = file_get_contents($archivoEncontrado);
-
-                    if ($imageContent === false) {
-                        throw new \Exception("Error al leer el archivo: $nombreImagen");
+                    if (!is_readable($fullImagePath)) {
+                        throw new \Exception("No se puede leer el archivo: $nombreImagen");
                     }
 
-                    // ✅ 1. Guardar imagen original
+                    $imageContent = file_get_contents($fullImagePath);
+                    if ($imageContent === false) {
+                        throw new \Exception("Error al leer el contenido del archivo: $nombreImagen");
+                    }
+
+                    // ✅ Crear imagen
                     $image = $folder->storeImage($imageContent, $nombreImagen);
 
-                    // ✅ 2. Procesar imagen (recorte con Python) - PERO SIN análisis IA
-                    try {
-                        $processedImage = app(\App\Services\ImageProcessingService::class)->process($image);
+                    // ✅ CORREGIDO: Procesar imagen directamente en lugar de despachar job incorrecto
+                    $imageProcessingService = app(ImageProcessingService::class);
+                    $processedImage = $imageProcessingService->process($image, $this->batchId);
 
-                        if (!$processedImage || $processedImage->status === 'error') {
-                            Log::warning("⚠️ Recorte automático falló para $nombreImagen, quedará para recorte manual");
-                        } else {
-                            Log::info("✅ Imagen recortada automáticamente: $nombreImagen");
-                        }
-                    } catch (\Exception $e) {
-                        Log::warning("⚠️ Error en recorte automático para $nombreImagen: " . $e->getMessage());
-                        // No es crítico, la imagen queda para recorte manual
+                    if ($processedImage && $processedImage->status !== 'error') {
+                        $asignadas++;
+                        Log::debug("✅ Imagen {$nombreImagen} procesada correctamente");
+                    } else {
+                        $errores++;
+                        $errorMessages[] = "Error procesando imagen: $nombreImagen";
+                        Log::warning("⚠️ Error procesando imagen {$nombreImagen}");
                     }
 
-                    $asignadas++;
-                    Log::info("✅ Imagen procesada (guardada + recorte): $nombreImagen -> {$folder->name}");
-
-                    $batch->update(['processed' => $asignadas]);
+                    // ✅ Actualizar progreso cada 10 imágenes
+                    if (($asignadas + $errores) % 10 === 0) {
+                        $batch->refresh();
+                        Log::info("📊 Progreso batch {$this->batchId}: {$batch->processed} procesadas, {$batch->errors} errores");
+                    }
 
                 } catch (\Exception $e) {
-                    Log::error("❌ Error asignando $nombreImagen: " . $e->getMessage());
+                    Log::error("Error asignando imagen $nombreImagen: " . $e->getMessage());
                     $errores++;
-                    $errorMessages[] = "Error asignando imagen: $nombreImagen - " . $e->getMessage();
-                    $batch->update(['errors' => $errores]);
+                    $errorMessages[] = "Error interno al asignar imagen: $nombreImagen - " . $e->getMessage();
+
+                    // Actualizar errores en el batch
+                    $batch->increment('errors');
+                    $batch->touch();
                 }
             }
 
-            // ✅ Determinar estado final
-            if ($errores === 0) {
+            // ✅ Actualización final del batch
+            $batch->refresh();
+            $totalProcesadas = $batch->processed; // Usar el valor real del batch
+            $totalErrores = $batch->errors ?? 0;
+
+            if ($totalErrores === 0) {
                 $finalStatus = 'completed';
-            } elseif ($asignadas > 0) {
+            } elseif ($totalProcesadas > 0) {
                 $finalStatus = 'completed_with_errors';
             } else {
                 $finalStatus = 'failed';
             }
 
             $batch->update([
-                'processed' => $asignadas,
-                'errors' => $errores,
                 'status' => $finalStatus,
                 'error_messages' => $errorMessages
             ]);
 
-            // Limpiar directorio temporal
+            // Cleanup
             if (File::exists($this->tempPath)) {
                 File::deleteDirectory($this->tempPath);
             }
 
-            Log::info("🎉 Procesamiento completado - Asignadas: $asignadas, Errores: $errores, Estado: $finalStatus");
+            Log::info("🎉 HandleZipMappingJob completado. Batch {$this->batchId}: {$totalProcesadas} procesadas, {$totalErrores} errores, estado: {$finalStatus}");
 
         } catch (\Throwable $e) {
-            Log::error("❌ Error crítico en HandleZipMappingJob: " . $e->getMessage());
+            Log::error("❌ Error crítico en HandleZipMappingJob batch {$this->batchId}: " . $e->getMessage());
+
             $batch->update([
                 'status' => 'failed',
                 'error_messages' => array_merge($errorMessages ?? [], ["Error crítico: " . $e->getMessage()])
@@ -176,151 +175,13 @@ class HandleZipMappingJob implements ShouldQueue
         }
     }
 
-    /**
-     * Obtener todos los archivos de imagen del ZIP extraído
-     */
-    private function obtenerArchivosDelZip(string $tempPath): array
+    public function failed(\Throwable $exception): void
     {
-        $archivos = [];
+        Log::error("❌ HandleZipMappingJob falló para batch {$this->batchId}: " . $exception->getMessage());
 
-        if (!File::exists($tempPath)) {
-            Log::error("❌ Directorio temporal no existe: $tempPath");
-            return $archivos;
+        $batch = ImageBatch::find($this->batchId);
+        if ($batch) {
+            $batch->update(['status' => 'failed']);
         }
-
-        $files = File::allFiles($tempPath);
-
-        foreach ($files as $file) {
-            $extension = strtolower($file->getExtension());
-
-            if (in_array($extension, ['jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp'])) {
-                $absolutePath = $file->getPathname();
-                $relativePath = str_replace($tempPath . DIRECTORY_SEPARATOR, '', $absolutePath);
-                $relativePath = str_replace('\\', '/', $relativePath);
-                $fileName = $file->getBasename();
-
-                // Mapear tanto el nombre como la ruta relativa
-                $archivos[$fileName] = $absolutePath;
-                $archivos[$relativePath] = $absolutePath;
-
-                Log::debug("📁 Mapeado: $fileName y $relativePath -> $absolutePath");
-            }
-        }
-
-        return $archivos;
-    }
-
-    /**
-     * Buscar un archivo de imagen usando diferentes estrategias
-     */
-    private function buscarArchivo(string $imagenPath, string $nombreImagen, array $archivosDisponibles): ?string
-    {
-        // 1. Buscar por ruta completa
-        if (isset($archivosDisponibles[$imagenPath])) {
-            return $archivosDisponibles[$imagenPath];
-        }
-
-        // 2. Buscar por nombre de archivo
-        if (isset($archivosDisponibles[$nombreImagen])) {
-            return $archivosDisponibles[$nombreImagen];
-        }
-
-        // 3. Buscar case-insensitive
-        foreach ($archivosDisponibles as $nombre => $ruta) {
-            if (strtolower($nombre) === strtolower($imagenPath) ||
-                strtolower($nombre) === strtolower($nombreImagen)) {
-                return $ruta;
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * ✅ NUEVO: Verificar que el entorno de procesamiento está configurado correctamente
-     */
-    private function verificarEntornoProcesamiento(): void
-    {
-        $pythonPath = env('PYTHON_PATH', '/usr/bin/python3');
-        $scriptPath = storage_path('app/scripts/process_image_improved.py');
-        $tmpDir = storage_path('app/tmp');
-
-        Log::info("🔍 Verificando entorno de procesamiento...");
-        Log::info("🐍 Python path: $pythonPath");
-        Log::info("📜 Script path: $scriptPath");
-        Log::info("📁 Temp dir: $tmpDir");
-
-        // Verificar Python
-        $pythonExists = file_exists($pythonPath) || (shell_exec("which python3") !== null);
-        Log::info("🐍 Python disponible: " . ($pythonExists ? "SÍ" : "NO"));
-
-        if (!$pythonExists) {
-            Log::warning("⚠️ Python no encontrado. Verifique PYTHON_PATH en .env");
-        }
-
-        // Verificar script
-        $scriptExists = file_exists($scriptPath);
-        Log::info("📜 Script existe: " . ($scriptExists ? "SÍ" : "NO"));
-
-        if (!$scriptExists) {
-            Log::warning("⚠️ Script Python no encontrado en: $scriptPath");
-        }
-
-        // Verificar directorio temporal
-        $tmpDirExists = is_dir($tmpDir);
-        $tmpDirWritable = $tmpDirExists && is_writable($tmpDir);
-
-        Log::info("📁 Directorio tmp existe: " . ($tmpDirExists ? "SÍ" : "NO"));
-        Log::info("✏️ Directorio tmp escribible: " . ($tmpDirWritable ? "SÍ" : "NO"));
-
-        if (!$tmpDirExists) {
-            Log::warning("⚠️ Creando directorio temporal: $tmpDir");
-            try {
-                mkdir($tmpDir, 0755, true);
-                Log::info("✅ Directorio temporal creado");
-            } catch (\Exception $e) {
-                Log::error("❌ Error creando directorio temporal: " . $e->getMessage());
-            }
-        }
-    }
-
-    /**
-     * Buscar carpeta de módulo navegando la jerarquía
-     */
-    private function buscarCarpetaModulo(string $path): ?Folder
-    {
-        // Ejemplo: "MÁS DE GIL / CT CT 1 / INV INV 1 / CB CB 1 / TRK TRK 1 / STR STR 1 / MOD MOD 1"
-        $partes = array_map('trim', explode(' / ', $path));
-
-        if (count($partes) < 2) {
-            return null;
-        }
-
-        // Empezar desde la raíz (saltar el nombre del proyecto)
-        $parentId = null;
-
-        for ($i = 1; $i < count($partes); $i++) {
-            $nombreParte = $partes[$i];
-
-            $carpeta = Folder::where('project_id', $this->projectId)
-                ->where('parent_id', $parentId)
-                ->where('name', $nombreParte)
-                ->first();
-
-            if (!$carpeta) {
-                Log::warning("❌ No se encontró: '$nombreParte' bajo parent_id: $parentId");
-                return null;
-            }
-
-            $parentId = $carpeta->id;
-        }
-
-        // La última carpeta debe ser un módulo
-        $moduloFinal = Folder::find($parentId);
-        if ($moduloFinal && $moduloFinal->type === 'modulo') {
-            return $moduloFinal;
-        }
-
-        return null;
     }
 }
