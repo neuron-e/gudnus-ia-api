@@ -204,12 +204,12 @@ return [
                 'processes' => 3,
                 'tries' => 3,
             ],
-            'supervisor-image-processing' => [
+            'supervisor-images' => [
                 'connection' => 'redis',
-                'queue' => ['image-processing'],
+                'queue' => ['images'],
                 'balance' => 'simple',
                 'processes' => 5,
-                'tries' => 2,
+                'tries' => 3,
                 'timeout' => 900,
             ],
             'supervisor-heavy' => [
