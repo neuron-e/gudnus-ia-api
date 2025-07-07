@@ -92,10 +92,10 @@ class HandleZipMappingJob implements ShouldQueue
                 'error_messages' => ["Error crítico: " . $e->getMessage()]
             ]);
         } finally {
-            if ($tempPath && File::exists($tempPath)) {
+/*            if ($tempPath && File::exists($tempPath)) {
                 File::deleteDirectory($tempPath);
                 Log::info("🧹 Directorio temporal eliminado: {$tempPath}");
-            }
+            }*/
 
             if (file_exists($this->zipPath)) {
                 @unlink($this->zipPath);

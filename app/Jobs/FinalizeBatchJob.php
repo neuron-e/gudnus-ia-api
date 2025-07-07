@@ -8,6 +8,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 
 class FinalizeBatchJob implements ShouldQueue
@@ -53,6 +54,11 @@ class FinalizeBatchJob implements ShouldQueue
         $batch->update([
             'status' => $finalStatus,
         ]);
+
+        if ($batch->temp_path && File::exists($batch->temp_path)) {
+            File::deleteDirectory($batch->temp_path);
+            Log::info("🧹 Directorio temporal eliminado (Finalize): {$batch->temp_path}");
+        }
 
         Log::info("🎉 FinalizeBatchJob: Batch {$this->batchId} finalizado con estado: {$finalStatus}");
     }
