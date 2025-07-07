@@ -20,6 +20,7 @@ class ProcessImageImmediatelyJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    public $queue = 'images';
     // ✅ Timeouts ajustados para análisis IA masivo
     public $timeout = 1800; // 30 minutos para lotes grandes (Azure puede ser lento)
     public $tries = 2; // Solo 2 intentos para análisis IA (es costoso)

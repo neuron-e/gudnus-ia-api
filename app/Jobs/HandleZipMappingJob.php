@@ -20,6 +20,7 @@ class HandleZipMappingJob implements ShouldQueue
     public $timeout = 3600;
     public $tries = 2;
 
+    public $queue = 'images';
     public function __construct(
         public int $projectId,
         public array $mapping,

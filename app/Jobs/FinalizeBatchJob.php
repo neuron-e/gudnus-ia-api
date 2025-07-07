@@ -17,6 +17,8 @@ class FinalizeBatchJob implements ShouldQueue
     public $timeout = 300;
     public $tries = 1;
 
+    public $queue = 'images';
+
     public function __construct(public int $batchId) {}
 
     public function handle(): void
