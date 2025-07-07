@@ -342,7 +342,9 @@ class ImageController extends Controller
             'type' => 'zip-mapping',
             'total' => count($mapping),
             'status' => 'processing',
+            'temp_path' => $tempExtractPath, // ✅ Añadido
         ]);
+
 
         // ✅ Aquí estaba el error
         dispatch(new HandleZipMappingJob(
