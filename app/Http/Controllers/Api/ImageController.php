@@ -318,55 +318,30 @@ class ImageController extends Controller
             return response()->json(['error' => 'Formato de mapping inválido'], 422);
         }
 
-        // Preparar directorio temporal único
         $file = $request->file('zip');
         $ext = strtolower($file->getClientOriginalExtension());
-        $path = storage_path("app/temp_zip_{$project->id}");
         $zipFileName = 'batch_' . uniqid() . '_' . time() . '.zip';
-        //$zipStoragePath = "temp_zips/{$zipFileName}";
 
-        // Guardar ZIP en storage persistente
         $destPath = storage_path("app/temp_zips/{$zipFileName}");
-        $request->file('zip')->move(storage_path('app/temp_zips'), $zipFileName);
-
-        $fullZipPath = $destPath;
+        $file->move(storage_path('app/temp_zips'), $zipFileName);
 
         Log::info("📦 ZIP guardado en path persistente:", [
-            'zip_path' => $fullZipPath,
-            'zip_exists' => file_exists($fullZipPath),
-            'zip_size' => file_exists($fullZipPath) ? filesize($fullZipPath) : 0
+            'zip_path' => $destPath,
+            'zip_exists' => file_exists($destPath),
+            'zip_size' => file_exists($destPath) ? filesize($destPath) : 0
         ]);
 
-        if ($ext === 'zip') {
-            if (!file_exists($fullZipPath)) {
-                Log::error("❌ El archivo ZIP no existe: $fullZipPath");
-                return response()->json(['error' => 'ZIP no encontrado'], 500);
-            }
-
-            $zip = new \ZipArchive;
-            if ($zip->open($fullZipPath) !== true) {
-                return response()->json(['error' => 'No se pudo abrir el ZIP guardado'], 500);
-            }
-            $zip->extractTo($path);
-            $zip->close();
-        } elseif ($ext === 'rar') {
-            if (!file_exists($fullZipPath)) {
-                Log::error("❌ El archivo RAR no existe: $fullZipPath");
-                return response()->json(['error' => 'RAR no encontrado'], 500);
-            }
-
-            $cmd = "unrar x -y \"$fullZipPath\" \"$path\"";
-            exec($cmd, $output, $code);
-
-            if ($code !== 0) {
-                Log::error("❌ Fallo al extraer RAR", [
-                    'cmd' => $cmd,
-                    'code' => $code,
-                    'output' => $output
-                ]);
-                return response()->json(['error' => 'No se pudo extraer el RAR'], 500);
-            }
+        if (!file_exists($destPath)) {
+            Log::error("❌ El archivo ZIP no existe: $destPath");
+            return response()->json(['error' => 'ZIP no encontrado'], 500);
         }
+
+        // Solo verificamos si es un ZIP válido (opcional: eliminar esta parte si el Job lo maneja)
+        $zip = new \ZipArchive;
+        if ($zip->open($destPath) !== true) {
+            return response()->json(['error' => 'No se pudo abrir el ZIP guardado'], 500);
+        }
+        $zip->close();
 
         $batch = ImageBatch::create([
             'project_id' => $project->id,
@@ -375,7 +350,8 @@ class ImageController extends Controller
             'status' => 'processing',
         ]);
 
-        dispatch(new HandleZipMappingJob($project->id, $mapping, $path, $batch->id));
+        // ✅ Aquí estaba el error
+        dispatch(new HandleZipMappingJob($project->id, $mapping, $destPath, $batch->id));
 
         return response()->json([
             'ok' => true,
@@ -383,6 +359,7 @@ class ImageController extends Controller
             'batch_id' => $batch->id,
         ]);
     }
+
 
     public function manualCrop(Request $request, Image $image)
     {
