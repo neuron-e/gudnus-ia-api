@@ -3,4 +3,5 @@
 !public/
 !scripts/
 !scripts/**
+!images/fallback.png
 !.gitignore
