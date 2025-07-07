@@ -19,6 +19,7 @@ class HandleZipMappingJob implements ShouldQueue
 
     public $timeout = 3600;
     public $tries = 2;
+
     public function __construct(
         public int $projectId,
         public array $mapping,
@@ -34,10 +35,21 @@ class HandleZipMappingJob implements ShouldQueue
             return;
         }
 
-        Log::info("🚀 INICIANDO HandleZipMappingJob para batch {$this->batchId} con " . count($this->mapping) . " asignaciones");
-        Log::info("📦 ZIP recibido: {$this->zipPath}");
+        // ✅ Verificar que el batch no esté ya completado
+        if (in_array($batch->status, ['completed', 'completed_with_errors', 'failed'])) {
+            Log::warning("⚠️ Batch {$this->batchId} ya está en estado final: {$batch->status}");
+            return;
+        }
 
-        $batch->update(['status' => 'processing']);
+        Log::info("🚀 INICIANDO HandleZipMappingJob para batch {$this->batchId} con " . count($this->mapping) . " asignaciones");
+
+        $batch->update([
+            'status' => 'processing',
+            'total' => count($this->mapping),
+            'expected_total' => count($this->mapping),
+            'dispatched_total' => 0 // ✅ Inicializar en 0
+        ]);
+
         $tempPath = null;
 
         try {
@@ -45,15 +57,11 @@ class HandleZipMappingJob implements ShouldQueue
                 throw new \Exception("Archivo ZIP no encontrado: {$this->zipPath}");
             }
 
-            $zipSize = filesize($this->zipPath);
-            Log::info("✅ ZIP verificado: {$zipSize} bytes");
-
             $tempPath = storage_path("app/temp_extract_" . $this->batchId . "_" . time());
             if (File::exists($tempPath)) {
                 File::deleteDirectory($tempPath);
             }
             File::makeDirectory($tempPath, 0755, true);
-            Log::info("📁 Directorio temporal creado: {$tempPath}");
 
             Log::info("📦 Extrayendo ZIP...");
             $zip = new \ZipArchive;
@@ -67,23 +75,45 @@ class HandleZipMappingJob implements ShouldQueue
 
             Log::info("✅ ZIP extraído: {$numFiles} archivos en {$tempPath}");
 
-            $batch->update(['expected_total' => count($this->mapping)]);
+            // ✅ Guardar el tempPath en el batch para limpieza posterior
+            $batch->update(['temp_path' => $tempPath]);
 
-            // ✅ Procesamiento en chunks para distribuir la carga
-            $chunks = array_chunk($this->mapping, 100);
+            // ✅ Despachar jobs en chunks para evitar sobrecargas
+            $chunks = array_chunk($this->mapping, 50); // Reducido a 50 por chunk
+            $totalDispatched = 0;
+
             foreach ($chunks as $chunkIndex => $chunk) {
-                foreach ($chunk as $index => $asignacion) {
+                foreach ($chunk as $asignacion) {
+                    // ✅ Verificar nuevamente el estado del batch antes de cada dispatch
+                    $batch->refresh();
+                    if (in_array($batch->status, ['completed', 'completed_with_errors', 'failed'])) {
+                        Log::warning("⚠️ Batch {$this->batchId} completado durante el dispatch. Deteniendo.");
+                        break 2; // Salir de ambos loops
+                    }
+
                     dispatch(new ProcessZipImageJob(
                         $this->projectId,
                         $asignacion,
                         $tempPath,
                         $this->batchId
                     ))->onQueue('images');
+
+                    $totalDispatched++;
+                }
+
+                // ✅ Actualizar dispatched_total por chunks
+                $batch->update(['dispatched_total' => $totalDispatched]);
+
+                // ✅ Pequeña pausa entre chunks para evitar overwhelming
+                if ($chunkIndex < count($chunks) - 1) {
+                    usleep(100000); // 100ms
                 }
             }
-            $batch->update(['dispatched_total' => count($this->mapping)]);
-            // ✅ Programar job de finalización después de todos los sub-jobs
-            dispatch(new FinalizeBatchJob($this->batchId))->delay(now()->addMinutes(10));
+
+            Log::info("✅ Despachados {$totalDispatched} jobs para batch {$this->batchId}");
+
+            // ✅ Programar job de finalización con delay más conservador
+            dispatch(new FinalizeBatchJob($this->batchId))->delay(now()->addMinutes(15));
 
         } catch (\Throwable $e) {
             Log::error("❌ ERROR CRÍTICO en HandleZipMappingJob: " . $e->getMessage());
@@ -92,11 +122,7 @@ class HandleZipMappingJob implements ShouldQueue
                 'error_messages' => ["Error crítico: " . $e->getMessage()]
             ]);
         } finally {
-/*            if ($tempPath && File::exists($tempPath)) {
-                File::deleteDirectory($tempPath);
-                Log::info("🧹 Directorio temporal eliminado: {$tempPath}");
-            }*/
-
+            // ✅ NO eliminar tempPath aquí, se hará en FinalizeBatchJob
             if (file_exists($this->zipPath)) {
                 @unlink($this->zipPath);
                 Log::info("🧹 ZIP eliminado: {$this->zipPath}");
