@@ -322,26 +322,20 @@ class ImageController extends Controller
         $ext = strtolower($file->getClientOriginalExtension());
         $zipFileName = 'batch_' . uniqid() . '_' . time() . '.zip';
 
-        $destPath = storage_path("app/temp_zips/{$zipFileName}");
-        $file->move(storage_path('app/temp_zips'), $zipFileName);
+        $zipStoragePath = "temp_zips/{$zipFileName}";
+        $fullZipPath = storage_path("app/{$zipStoragePath}");
+        $request->file('zip')->move(storage_path('app/temp_zips'), $zipFileName);
 
-        Log::info("📦 ZIP guardado en path persistente:", [
-            'zip_path' => $destPath,
-            'zip_exists' => file_exists($destPath),
-            'zip_size' => file_exists($destPath) ? filesize($destPath) : 0
-        ]);
+// Extraer ZIP a carpeta temporal
+        $tempExtractPath = storage_path("app/temp_extract_{$project->id}_" . time());
 
-        if (!file_exists($destPath)) {
-            Log::error("❌ El archivo ZIP no existe: $destPath");
-            return response()->json(['error' => 'ZIP no encontrado'], 500);
-        }
-
-        // Solo verificamos si es un ZIP válido (opcional: eliminar esta parte si el Job lo maneja)
         $zip = new \ZipArchive;
-        if ($zip->open($destPath) !== true) {
-            return response()->json(['error' => 'No se pudo abrir el ZIP guardado'], 500);
+        if ($zip->open($fullZipPath) !== true) {
+            return response()->json(['error' => 'No se pudo abrir el ZIP'], 500);
         }
+        $zip->extractTo($tempExtractPath);
         $zip->close();
+
 
         $batch = ImageBatch::create([
             'project_id' => $project->id,
@@ -351,7 +345,7 @@ class ImageController extends Controller
         ]);
 
         // ✅ Aquí estaba el error
-        dispatch(new HandleZipMappingJob($project->id, $mapping, $destPath, $batch->id));
+        dispatch(new HandleZipMappingJob($project->id, $mapping, $tempExtractPath, $batch->id));
 
         return response()->json([
             'ok' => true,
