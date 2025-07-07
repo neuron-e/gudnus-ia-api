@@ -5,7 +5,6 @@ namespace App\Jobs;
 use App\Models\Folder;
 use App\Models\Image;
 use App\Models\ImageBatch;
-use App\Services\ImageProcessingService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -14,6 +13,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\File;
+use App\Services\ImageProcessingService;
 
 class HandleZipMappingJob implements ShouldQueue
 {
@@ -46,31 +46,23 @@ class HandleZipMappingJob implements ShouldQueue
 
         try {
             foreach ($this->mapping as $index => $asignacion) {
-                $relativePath = str_replace('\\', '/', ltrim($asignacion['imagen'], '/'));
-                $nombreImagen = basename($relativePath);
+                $nombreImagen = basename($asignacion['imagen']);
                 $moduloPath = trim($asignacion['modulo']);
-                $fullImagePath = $this->tempPath . '/' . $relativePath;
+                $fullImagePath = $this->tempPath . '/' . $asignacion['imagen'];
 
                 Log::debug("📝 Procesando [{$index}]: {$nombreImagen} -> {$moduloPath}");
 
                 if (!file_exists($fullImagePath) || !is_file($fullImagePath)) {
-                    Log::warning("❗️Archivo no encontrado: {$fullImagePath}, intentando buscar por nombre...");
-                    $fullImagePath = $this->buscarPorNombre($nombreImagen);
-                }
+                    // Buscar por nombre suelto
+                    $found = collect(File::allFiles($this->tempPath))->first(fn($file) => strtolower($file->getFilename()) === strtolower($nombreImagen));
+                    $fullImagePath = $found?->getPathname();
 
-                if (!file_exists($fullImagePath) || !is_file($fullImagePath)) {
-                    $errorMessages[] = "Archivo no encontrado o inválido: $nombreImagen";
-                    $errorCount++;
-                    $this->updateBatchError($batch);
-                    continue;
-                }
-
-                $extension = strtolower(pathinfo($fullImagePath, PATHINFO_EXTENSION));
-                if (!in_array($extension, ['jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp'])) {
-                    $errorMessages[] = "Extensión no válida: $nombreImagen";
-                    $errorCount++;
-                    $this->updateBatchError($batch);
-                    continue;
+                    if (!$fullImagePath || !file_exists($fullImagePath)) {
+                        $errorMessages[] = "Archivo no encontrado: $nombreImagen";
+                        $this->updateBatchError($batch);
+                        $errorCount++;
+                        continue;
+                    }
                 }
 
                 $folder = Folder::where('project_id', $this->projectId)
@@ -79,8 +71,8 @@ class HandleZipMappingJob implements ShouldQueue
 
                 if (!$folder) {
                     $errorMessages[] = "Módulo no encontrado: $moduloPath";
-                    $errorCount++;
                     $this->updateBatchError($batch);
+                    $errorCount++;
                     continue;
                 }
 
@@ -92,32 +84,35 @@ class HandleZipMappingJob implements ShouldQueue
                         throw new \Exception("No se pudo leer el archivo");
                     }
 
-                    $image = $folder->storeImage($imageContent, $nombreImagen);
+                    $wasabiPath = "projects/{$this->projectId}/images/" . uniqid('zip_') . "_" . $nombreImagen;
+                    Storage::disk('wasabi')->put($wasabiPath, $imageContent);
+
+                    $image = Image::create([
+                        'folder_id' => $folder->id,
+                        'project_id' => $this->projectId,
+                        'filename' => $nombreImagen,
+                        'original_path' => $wasabiPath,
+                        'status' => 'uploaded'
+                    ]);
+
                     Log::info("📷 Imagen creada: ID {$image->id}");
 
-                    $success = $this->processImageWithService($image, $this->batchId);
+                    $service = app(ImageProcessingService::class);
+                    $processed = $service->process($image, $this->batchId);
 
-                    if ($success) {
+                    if ($processed && $processed->status === 'processed') {
                         $processedCount++;
                         $this->updateBatchSuccess($batch);
-                        Log::info("✅ [{$processedCount}] Imagen procesada: {$nombreImagen}");
+                        Log::info("✅ Imagen procesada correctamente: {$nombreImagen}");
                     } else {
-                        $errorCount++;
-                        $errorMessages[] = "Error procesando: $nombreImagen";
+                        $errorMessages[] = "Error procesando: {$nombreImagen}";
                         $this->updateBatchError($batch);
-                        Log::error("❌ Error procesando imagen: {$nombreImagen}");
+                        $errorCount++;
                     }
-
-                    if (($processedCount + $errorCount) % 25 === 0) {
-                        $batch->refresh();
-                        Log::info("📊 Progreso: {$batch->processed}/{$batch->total} procesadas, {$batch->errors} errores");
-                    }
-
                 } catch (\Exception $e) {
-                    $errorCount++;
-                    $errorMessages[] = "Error con imagen $nombreImagen: " . $e->getMessage();
+                    $errorMessages[] = "Error procesando {$nombreImagen}: {$e->getMessage()}";
                     $this->updateBatchError($batch);
-                    Log::error("❌ Exception procesando {$nombreImagen}: " . $e->getMessage());
+                    $errorCount++;
                 }
             }
 
@@ -137,17 +132,6 @@ class HandleZipMappingJob implements ShouldQueue
         }
     }
 
-    private function buscarPorNombre(string $nombre): ?string
-    {
-        $archivos = File::allFiles($this->tempPath);
-        foreach ($archivos as $file) {
-            if (strtolower($file->getFilename()) === strtolower($nombre)) {
-                return $file->getPathname();
-            }
-        }
-        return null;
-    }
-
     private function cleanExistingImages(Folder $folder): void
     {
         foreach ($folder->images as $existing) {
@@ -157,22 +141,9 @@ class HandleZipMappingJob implements ShouldQueue
             if ($existing->processedImage && Storage::disk('wasabi')->exists($existing->processedImage->corrected_path)) {
                 Storage::disk('wasabi')->delete($existing->processedImage->corrected_path);
             }
-
             $existing->processedImage()?->delete();
             $existing->analysisResult()?->delete();
             $existing->delete();
-        }
-    }
-
-    private function processImageWithService(Image $image, int $batchId): bool
-    {
-        try {
-            $imageProcessingService = app(ImageProcessingService::class);
-            $result = $imageProcessingService->process($image, $batchId);
-            return $result && $result->status !== 'error';
-        } catch (\Exception $e) {
-            Log::error("Error en ImageProcessingService para imagen {$image->id}: " . $e->getMessage());
-            return false;
         }
     }
 
@@ -192,33 +163,23 @@ class HandleZipMappingJob implements ShouldQueue
     {
         $batch->refresh();
 
-        $totalProcessed = $batch->processed;
-        $totalErrors = $batch->errors ?? 0;
+        $processed = $batch->processed;
+        $errores = $batch->errors ?? 0;
 
-        Log::info("🔍 Estado final del batch {$batch->id}:", [
-            'processed' => $totalProcessed,
-            'errors' => $totalErrors,
-            'total' => $batch->total
-        ]);
-
-        $finalStatus = match (true) {
-            $totalErrors === 0 && $totalProcessed > 0 => 'completed',
-            $totalProcessed > 0 => 'completed_with_errors',
-            default => 'failed'
-        };
+        $status = $processed > 0 && $errores === 0 ? 'completed'
+            : ($processed > 0 ? 'completed_with_errors' : 'failed');
 
         $batch->update([
-            'status' => $finalStatus,
+            'status' => $status,
             'error_messages' => $errorMessages
         ]);
 
-        Log::info("🎉 Batch {$batch->id} finalizado: {$totalProcessed} procesadas, {$totalErrors} errores, estado: {$finalStatus}");
+        Log::info("🎉 Batch {$batch->id} finalizado con estado: {$status}");
     }
 
     public function failed(\Throwable $exception): void
     {
-        Log::error("❌ HandleZipMappingJob falló para batch {$this->batchId}: " . $exception->getMessage());
-
+        Log::error("❌ Job falló para batch {$this->batchId}: " . $exception->getMessage());
         $batch = ImageBatch::find($this->batchId);
         if ($batch) {
             $batch->update(['status' => 'failed']);
