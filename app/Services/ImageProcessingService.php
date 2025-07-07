@@ -154,13 +154,25 @@ class ImageProcessingService
 
         $process = proc_open($cmd, $descriptorspec, $pipes);
 
-        if (!is_resource($process)) {
-            $msg = "No se pudo ejecutar el comando Python";
-            Log::error("❌ " . $msg);
-            $image->update(['status' => 'error']);
-            $this->handleBatchError($batchId, $msg);
-            @unlink($originalTemp);
-            return $image;
+        $timeoutSeconds = 60;
+        $start = time();
+
+        while (is_resource($process)) {
+            $status = proc_get_status($process);
+            if (!$status['running']) {
+                break;
+            }
+            if ((time() - $start) > $timeoutSeconds) {
+                proc_terminate($process, 9); // SIGKILL
+                $msg = "Timeout alcanzado al ejecutar el script (>$timeoutSeconds s)";
+                Log::error("❌ " . $msg);
+                $image->update(['status' => 'error']);
+                $this->handleBatchError($batchId, $msg);
+                @unlink($originalTemp);
+                @unlink($outputTemp);
+                return $image;
+            }
+            usleep(200000); // 200ms
         }
 
         fclose($pipes[0]); // Cerrar stdin

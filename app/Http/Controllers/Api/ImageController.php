@@ -336,17 +336,32 @@ class ImageController extends Controller
         ]);
 
         if ($ext === 'zip') {
+            if (!file_exists($fullZipPath)) {
+                Log::error("❌ El archivo ZIP no existe: $fullZipPath");
+                return response()->json(['error' => 'ZIP no encontrado'], 500);
+            }
+
             $zip = new \ZipArchive;
-            if ($zip->open($file->getPathname()) !== true) {
-                return response()->json(['error' => 'No se pudo abrir el ZIP'], 500);
+            if ($zip->open($fullZipPath) !== true) {
+                return response()->json(['error' => 'No se pudo abrir el ZIP guardado'], 500);
             }
             $zip->extractTo($path);
             $zip->close();
         } elseif ($ext === 'rar') {
-            $rarPath = $file->getPathname();
-            $cmd = "unrar x -y \"$rarPath\" \"$path\"";
+            if (!file_exists($fullZipPath)) {
+                Log::error("❌ El archivo RAR no existe: $fullZipPath");
+                return response()->json(['error' => 'RAR no encontrado'], 500);
+            }
+
+            $cmd = "unrar x -y \"$fullZipPath\" \"$path\"";
             exec($cmd, $output, $code);
+
             if ($code !== 0) {
+                Log::error("❌ Fallo al extraer RAR", [
+                    'cmd' => $cmd,
+                    'code' => $code,
+                    'output' => $output
+                ]);
                 return response()->json(['error' => 'No se pudo extraer el RAR'], 500);
             }
         }

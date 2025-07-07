@@ -99,9 +99,23 @@ class HandleZipMappingJob implements ShouldQueue
             $primeraAsignacion = $this->mapping[0];
             Log::info("🧪 PROCESANDO SOLO LA PRIMERA IMAGEN:");
 
-            $nombreImagen = basename($primeraAsignacion['imagen']);
+            $relativePath = str_replace('\\', '/', ltrim($primeraAsignacion['imagen'], '/'));
+            $nombreImagen = basename($relativePath); // sigue usando el nombre limpio para logs, wasabi, etc.
             $moduloPath = trim($primeraAsignacion['modulo']);
-            $fullImagePath = $tempPath . '/' . $nombreImagen;
+            $fullImagePath = $tempPath . '/' . $relativePath;
+
+            if (!file_exists($fullImagePath)) {
+                Log::info("❗️Archivo con path original no encontrado: {$fullImagePath}");
+                Log::info("🔍 Buscando por coincidencia de nombre...");
+
+                foreach ($extractedFiles as $file) {
+                    if (strtolower($file->getFilename()) === strtolower($nombreImagen)) {
+                        $fullImagePath = $file->getPathname();
+                        Log::info("✅ Encontrado por nombre: {$file->getFilename()}");
+                        break;
+                    }
+                }
+            }
 
             Log::info("📝 Datos primera imagen:", [
                 'imagen' => $nombreImagen,
