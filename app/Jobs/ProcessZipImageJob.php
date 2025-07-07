@@ -89,7 +89,12 @@ class ProcessZipImageJob implements ShouldQueue
             $processed = $service->process($image, $this->batchId);
 
             if ($processed && $processed->status === 'processed') {
-                $batch->increment('processed');
+                // ⚠️ Evitar que se cuente varias veces la misma imagen
+                if (!$image->is_counted) {
+                    $batch->increment('processed');
+                    $image->is_counted = true;
+                    $image->save();
+                }
             } else {
                 $this->incrementError($batch, "Fallo al procesar: {$nombreImagen}");
             }

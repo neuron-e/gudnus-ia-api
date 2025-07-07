@@ -70,10 +70,10 @@ class AnalysisBatchController extends Controller
             Log::warning("Auto-marcando batch {$oldBatch->id} como fallido por ser muy antiguo (8+ horas)");
         }
 
-        // ✅ CORREGIDO: Buscar batch más reciente con mejor logging
+        // ✅ Buscar el batch más reciente activo
         $batch = ImageBatch::where('project_id', $project->id)
             ->whereIn('status', ['processing', 'pending'])
-            ->latest('id') // ✅ Ordenar por ID para asegurar el más reciente
+            ->latest('id')
             ->first();
 
         if (!$batch) {
@@ -89,7 +89,7 @@ class AnalysisBatchController extends Controller
             ]);
         }
 
-        // ✅ Logging detallado para debug
+        // ✅ Logging extra
         Log::debug("Batch encontrado para proyecto {$project->id}", [
             'batch_id' => $batch->id,
             'status' => $batch->status,
@@ -100,7 +100,7 @@ class AnalysisBatchController extends Controller
             'created_at' => $batch->created_at
         ]);
 
-        // ✅ Verificar si hay múltiples batches activos (problema potencial)
+        // ✅ Verificación de múltiple batch activo
         $activeBatchesCount = ImageBatch::where('project_id', $project->id)
             ->whereIn('status', ['processing', 'pending'])
             ->count();
@@ -109,7 +109,7 @@ class AnalysisBatchController extends Controller
             Log::warning("⚠️ Se encontraron {$activeBatchesCount} batches activos para proyecto {$project->id}. Esto podría causar problemas.");
         }
 
-        // ✅ Calcular tiempo límite basado en el tamaño del batch
+        // ✅ Cálculo y detección de cuelgue
         $expectedMinutes = $this->calculateExpectedProcessingTime($batch);
         $minutesSinceUpdate = $batch->updated_at->diffInMinutes(now());
         $isStuck = $minutesSinceUpdate > $expectedMinutes;
@@ -123,13 +123,12 @@ class AnalysisBatchController extends Controller
             ]);
         }
 
+        // ✅ Comprobación realista con dispatched_total si está presente
+        $expected = $batch->dispatched_total ?? $batch->total;
         $totalDone = $batch->processed + ($batch->errors ?? 0);
-        $progress = $batch->total > 0
-            ? round(($totalDone / $batch->total) * 100)
-            : 0;
+        $progress = $expected > 0 ? round(($totalDone / $expected) * 100) : 0;
 
-        // ✅ CORREGIDO: Mejor detección de finalización
-        if ($totalDone >= $batch->total) {
+        if ($totalDone >= $expected) {
             $finalStatus = ($batch->errors ?? 0) > 0 ? 'completed_with_errors' : 'completed';
             $batch->update(['status' => $finalStatus]);
 
@@ -152,14 +151,14 @@ class AnalysisBatchController extends Controller
             'processing' => true,
             'progress' => $progress,
             'processed' => $batch->processed,
-            'total' => $batch->total,
+            'total' => $expected,
             'errors' => $batch->errors ?? 0,
             'batch_id' => $batch->id,
             'is_stuck' => $isStuck,
             'last_update' => $batch->updated_at->diffForHumans(),
             'expected_completion' => $this->estimateCompletionTime($batch),
             'debug_info' => [
-                'batch_size' => $batch->total,
+                'batch_size' => $expected,
                 'expected_minutes' => $expectedMinutes,
                 'minutes_since_update' => $minutesSinceUpdate,
                 'active_batches_count' => $activeBatchesCount,
