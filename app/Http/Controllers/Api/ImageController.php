@@ -322,8 +322,18 @@ class ImageController extends Controller
         $file = $request->file('zip');
         $ext = strtolower($file->getClientOriginalExtension());
         $path = storage_path("app/temp_zip_{$project->id}");
-        if (File::exists($path)) File::deleteDirectory($path);
-        File::makeDirectory($path, 0755, true);
+        $zipFileName = 'batch_' . uniqid() . '_' . time() . '.zip';
+        //$zipStoragePath = "temp_zips/{$zipFileName}";
+
+        // Guardar ZIP en storage persistente
+        $zipPath = $file->storeAs('temp_zips', $zipFileName, 'local');
+        $fullZipPath = storage_path("app/{$zipPath}");
+
+        Log::info("📦 ZIP guardado en path persistente:", [
+            'zip_path' => $fullZipPath,
+            'zip_exists' => file_exists($fullZipPath),
+            'zip_size' => file_exists($fullZipPath) ? filesize($fullZipPath) : 0
+        ]);
 
         if ($ext === 'zip') {
             $zip = new \ZipArchive;
