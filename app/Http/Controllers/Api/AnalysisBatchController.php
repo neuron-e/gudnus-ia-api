@@ -59,25 +59,13 @@ class AnalysisBatchController extends Controller
 
     public function processingStatusImage(Project $project)
     {
-        // ✅ Auto-limpiar batches muy antiguos (8 horas)
-        $veryOldBatches = ImageBatch::where('project_id', $project->id)
-            ->whereIn('status', ['processing', 'pending'])
-            ->where('updated_at', '<', Carbon::now()->subHours(8))
-            ->get();
-
-        foreach ($veryOldBatches as $oldBatch) {
-            $oldBatch->update(['status' => 'failed']);
-            Log::warning("Auto-marcando batch {$oldBatch->id} como fallido por ser muy antiguo (8+ horas)");
-        }
-
-        // ✅ Buscar el batch más reciente activo
+        // Buscar batch activo
         $batch = ImageBatch::where('project_id', $project->id)
             ->whereIn('status', ['processing', 'pending'])
             ->latest('id')
             ->first();
 
         if (!$batch) {
-            Log::debug("No hay batches activos para proyecto {$project->id}");
             return response()->json([
                 'processing' => false,
                 'progress' => 100,
@@ -85,83 +73,36 @@ class AnalysisBatchController extends Controller
             ]);
         }
 
-        Log::debug("Batch encontrado para proyecto {$project->id}", [
-            'batch_id' => $batch->id,
-            'status' => $batch->status,
-            'processed' => $batch->processed,
-            'total' => $batch->total,
-            'dispatched_total' => $batch->dispatched_total,
-            'expected_total' => $batch->expected_total,
-            'errors' => $batch->errors
-        ]);
+        // ✅ Calcular progreso simple y directo
+        $total = $batch->total;
+        $processed = $batch->processed;
+        $errors = $batch->errors ?? 0;
+        $totalDone = $processed + $errors;
 
-        // ✅ Usar dispatched_total si está disponible, sino expected_total, sino total
-        $expected = $batch->dispatched_total > 0 ? $batch->dispatched_total : ($batch->expected_total ?? $batch->total);
-        $totalDone = $batch->processed + ($batch->errors ?? 0);
+        $progress = $total > 0 ? round(($totalDone / $total) * 100) : 0;
 
-        // ✅ Prevenir que progress exceda 100%
-        $progress = $expected > 0 ? min(100, round(($totalDone / $expected) * 100)) : 0;
-
-        // ✅ Verificación de tiempo de cuelgue más robusta
-        $minutesSinceUpdate = $batch->updated_at->diffInMinutes(now());
-        $expectedMinutes = $this->calculateExpectedProcessingTime($batch);
-        $isStuck = $minutesSinceUpdate > max($expectedMinutes, 30); // Mínimo 30 minutos
-
-        if ($isStuck) {
-            Log::warning("ImageBatch {$batch->id} parece estar colgado", [
-                'minutes_since_update' => $minutesSinceUpdate,
-                'expected_minutes' => $expectedMinutes,
-                'batch_size' => $expected
-            ]);
-        }
-
-        // ✅ Lógica de finalización mejorada
-        if ($totalDone >= $expected ||
-            ($batch->dispatched_total > 0 && $totalDone >= $batch->dispatched_total)) {
-
-            $finalStatus = ($batch->errors ?? 0) > 0 ? 'completed_with_errors' : 'completed';
-
-            // ✅ Evitar que processed exceda lo esperado
-            $finalProcessed = min($batch->processed, $expected);
-
-            $batch->update([
-                'status' => $finalStatus,
-                'processed' => $finalProcessed
-            ]);
-
-            Log::info("🎉 Batch {$batch->id} completado automáticamente: {$finalProcessed} procesadas, {$batch->errors} errores");
+        // ✅ Solo marcar como completado cuando realmente llegue al total
+        if ($totalDone >= $total) {
+            $finalStatus = $errors > 0 ? 'completed_with_errors' : 'completed';
+            $batch->update(['status' => $finalStatus]);
 
             return response()->json([
                 'processing' => false,
                 'progress' => 100,
                 'batch_id' => null,
-                'completed_batch_id' => $batch->id,
-                'final_stats' => [
-                    'processed' => $finalProcessed,
-                    'errors' => $batch->errors ?? 0,
-                    'expected' => $expected
-                ]
+                'completed_batch_id' => $batch->id
             ]);
         }
 
+        // ✅ Respuesta con progreso real
         return response()->json([
             'processing' => true,
             'progress' => $progress,
-            'processed' => $batch->processed,
-            'total' => $expected,
-            'errors' => $batch->errors ?? 0,
+            'processed' => $processed,
+            'total' => $total,
+            'errors' => $errors,
             'batch_id' => $batch->id,
-            'is_stuck' => $isStuck,
-            'last_update' => $batch->updated_at->diffForHumans(),
-            'expected_completion' => $this->estimateCompletionTime($batch),
-            'debug_info' => [
-                'expected_used' => $expected,
-                'dispatched_total' => $batch->dispatched_total,
-                'expected_total' => $batch->expected_total,
-                'original_total' => $batch->total,
-                'minutes_since_update' => $minutesSinceUpdate,
-                'is_over_limit' => $totalDone > $expected
-            ]
+            'last_update' => $batch->updated_at->diffForHumans()
         ]);
     }
 
