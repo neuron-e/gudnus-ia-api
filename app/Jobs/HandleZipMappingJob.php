@@ -78,7 +78,7 @@ class HandleZipMappingJob implements ShouldQueue
                         $asignacion,
                         $tempPath,
                         $this->batchId
-                    ));
+                    ))->onQueue('images');
                 }
             }
 

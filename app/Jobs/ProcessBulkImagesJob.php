@@ -20,8 +20,6 @@ class ProcessBulkImagesJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $queue = 'images';
-
     public function __construct(
         public array $imageIds,
         public ?string $notifyEmail = null,

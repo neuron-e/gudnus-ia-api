@@ -19,7 +19,6 @@ class ProcessZipImageJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public $timeout = 600;
-    public $queue = 'images';
 
     public function __construct(
         public int $projectId,
