@@ -1,4 +1,6 @@
 <?php
+// Versión mejorada del ImageProcessingService con logging detallado
+
 namespace App\Services;
 
 use App\Models\Image;
@@ -22,120 +24,207 @@ class ImageProcessingService
         $batch->update([
             'error_messages' => array_merge($batch->error_messages ?? [], [$msg]),
         ]);
-        $batch->touch(); // ✅ Actualizar timestamp cuando hay errores
+        $batch->touch();
     }
 
     public function process(Image $image, $batchId = null): Image | null
     {
+        Log::info("🔧 INICIANDO ImageProcessingService para imagen {$image->id}");
+
         if (!$image || !$image->original_path) {
-            Log::error("❌ Imagen no encontrada para procesar (ID: {$image?->id})");
-            $this->handleBatchError($batchId, "Imagen no encontrada para procesar (ID: {$image?->id})");
+            $msg = "Imagen no encontrada para procesar (ID: {$image?->id})";
+            Log::error("❌ " . $msg);
+            $this->handleBatchError($batchId, $msg);
             return null;
         }
 
-        // ✅ Actualizar timestamp del batch al inicio
-        if ($batchId) {
-            $batch = \App\Models\ImageBatch::find($batchId);
-            if ($batch) {
-                $batch->touch();
+        // ✅ Verificaciones iniciales
+        $wasabiDisk = Storage::disk('wasabi');
+        if (!$wasabiDisk->exists($image->original_path)) {
+            $msg = "Imagen no existe en Wasabi: {$image->original_path}";
+            Log::error("❌ " . $msg);
+            $image->update(['status' => 'error']);
+            $this->handleBatchError($batchId, $msg);
+            return $image;
+        }
+
+        // ✅ Verificar configuración de Python
+        $pythonPath = env('PYTHON_PATH', '/usr/bin/python3');
+        $scriptPath = storage_path('app/scripts/process_image_improved.py');
+
+        Log::debug("🐍 Configuración Python:", [
+            'python_path' => $pythonPath,
+            'script_path' => $scriptPath,
+            'script_exists' => file_exists($scriptPath),
+            'python_executable' => is_executable($pythonPath)
+        ]);
+
+        if (!file_exists($scriptPath)) {
+            $msg = "Script de Python no encontrado: {$scriptPath}";
+            Log::error("❌ " . $msg);
+            $image->update(['status' => 'error']);
+            $this->handleBatchError($batchId, $msg);
+            return $image;
+        }
+
+        // ✅ Verificar directorio temporal
+        $tmpDir = storage_path('app/tmp');
+        if (!file_exists($tmpDir)) {
+            try {
+                mkdir($tmpDir, 0755, true);
+                Log::info("📁 Directorio temporal creado: {$tmpDir}");
+            } catch (\Exception $e) {
+                $msg = "No se pudo crear directorio temporal: " . $e->getMessage();
+                Log::error("❌ " . $msg);
+                $image->update(['status' => 'error']);
+                $this->handleBatchError($batchId, $msg);
+                return $image;
             }
         }
 
-        $wasabiDisk = Storage::disk('wasabi');
-        $pythonPath = env('PYTHON_PATH', '/usr/bin/python3');
-        $scriptPath = storage_path('app/scripts/process_image_improved.py');
-        $tmpDir = storage_path('app/tmp');
+        if (!is_writable($tmpDir)) {
+            $msg = "Directorio temporal no es escribible: {$tmpDir}";
+            Log::error("❌ " . $msg);
+            $image->update(['status' => 'error']);
+            $this->handleBatchError($batchId, $msg);
+            return $image;
+        }
 
-        // ✅ Paths temporales con ID único para evitar colisiones
+        // ✅ Paths temporales con ID único
         $uniqueId = uniqid('proc_' . $image->id . '_', true);
         $filename = 'aligned_' . $uniqueId . '.jpg';
         $originalTemp = $tmpDir . '/original_' . $uniqueId . '.jpg';
         $outputTemp = $tmpDir . '/' . $filename;
         $wasabiProcessedPath = "projects/{$image->project_id}/images/processed/{$filename}";
 
-        try {
-            if (!file_exists($tmpDir)) {
-                mkdir($tmpDir, 0755, true);
-            }
-            if (!is_writable($tmpDir)) {
-                throw new \Exception("El directorio no es escribible: $tmpDir");
-            }
-        } catch (\Throwable $e) {
-            Log::error("❌ No se pudo crear o acceder al directorio temporal", ['path' => $tmpDir, 'error' => $e->getMessage()]);
-            $image->update(['status' => 'error']);
-            $this->handleBatchError($batchId, "Error accediendo a tmp: " . $e->getMessage());
-            return $image;
-        }
+        Log::debug("📁 Paths generados:", [
+            'original_temp' => $originalTemp,
+            'output_temp' => $outputTemp,
+            'wasabi_processed' => $wasabiProcessedPath
+        ]);
 
-        // Descargar imagen desde Wasabi
         try {
+            // ✅ Descargar imagen desde Wasabi
+            Log::debug("⬇️ Descargando imagen desde Wasabi...");
+
             $stream = $wasabiDisk->readStream($image->original_path);
-            if (!$stream) throw new \Exception('No se pudo abrir el stream desde Wasabi');
+            if (!$stream) {
+                throw new \Exception('No se pudo abrir el stream desde Wasabi');
+            }
 
             $local = fopen($originalTemp, 'w+b');
-            if (!$local) throw new \Exception("No se pudo crear archivo local: $originalTemp");
+            if (!$local) {
+                throw new \Exception("No se pudo crear archivo local: $originalTemp");
+            }
 
             stream_copy_to_stream($stream, $local);
             fclose($stream);
             fclose($local);
 
-            // ✅ Verificar que el archivo se descargó correctamente
+            // ✅ Verificar descarga
             if (!file_exists($originalTemp) || filesize($originalTemp) === 0) {
                 throw new \Exception("Archivo descargado está vacío o no existe");
             }
 
+            $fileSize = filesize($originalTemp);
+            Log::debug("✅ Imagen descargada correctamente", [
+                'file_size' => $fileSize,
+                'file_exists' => file_exists($originalTemp)
+            ]);
+
         } catch (\Throwable $e) {
-            Log::error("❌ No se pudo descargar imagen original", ['image_id' => $image->id, 'error' => $e->getMessage()]);
+            $msg = "Error descargando imagen: " . $e->getMessage();
+            Log::error("❌ " . $msg);
             $image->update(['status' => 'error']);
-            $this->handleBatchError($batchId, "Descarga fallida para imagen ID {$image->id}: " . $e->getMessage());
-            @unlink($originalTemp); // ✅ Cleanup
+            $this->handleBatchError($batchId, $msg);
+            @unlink($originalTemp);
             return $image;
         }
 
-        // Ejecutar script Python
+        // ✅ Ejecutar script Python con mejor logging
         $cmd = "\"$pythonPath\" \"$scriptPath\" \"$originalTemp\" \"$outputTemp\"";
-        Log::debug("Ejecutando comando Python", ['cmd' => $cmd, 'image_id' => $image->id]);
+        Log::debug("🐍 Ejecutando comando Python:", ['cmd' => $cmd]);
 
-        exec($cmd, $output, $returnCode);
+        // ✅ Ejecutar con timeout y captura de errores
+        $descriptorspec = [
+            0 => ["pipe", "r"],  // stdin
+            1 => ["pipe", "w"],  // stdout
+            2 => ["pipe", "w"]   // stderr
+        ];
 
-        if ($returnCode !== 0 || !file_exists($outputTemp)) {
-            Log::error("⚠️ Error procesando imagen ID {$image->id}", [
-                'cmd' => $cmd,
-                'output' => $output,
-                'return_code' => $returnCode,
-                'output_exists' => file_exists($outputTemp)
+        $process = proc_open($cmd, $descriptorspec, $pipes);
+
+        if (!is_resource($process)) {
+            $msg = "No se pudo ejecutar el comando Python";
+            Log::error("❌ " . $msg);
+            $image->update(['status' => 'error']);
+            $this->handleBatchError($batchId, $msg);
+            @unlink($originalTemp);
+            return $image;
+        }
+
+        fclose($pipes[0]); // Cerrar stdin
+
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+
+        $returnCode = proc_close($process);
+
+        Log::debug("🐍 Resultado comando Python:", [
+            'return_code' => $returnCode,
+            'stdout_length' => strlen($stdout),
+            'stderr_length' => strlen($stderr),
+            'output_file_exists' => file_exists($outputTemp),
+            'output_file_size' => file_exists($outputTemp) ? filesize($outputTemp) : 0
+        ]);
+
+        if ($returnCode !== 0) {
+            $msg = "Script Python falló (código: {$returnCode})";
+            Log::error("❌ " . $msg, [
+                'stdout' => $stdout,
+                'stderr' => $stderr
             ]);
             $image->update(['status' => 'error']);
             @unlink($originalTemp);
             @unlink($outputTemp);
-            $this->handleBatchError($batchId, "Script falló para imagen ID {$image->id} (código: $returnCode)");
+            $this->handleBatchError($batchId, $msg . " - STDERR: " . $stderr);
             return $image;
         }
 
-        // ✅ Verificar que el archivo de salida tiene contenido
-        if (filesize($outputTemp) === 0) {
-            Log::error("❌ Archivo de salida está vacío para imagen ID {$image->id}");
+        if (!file_exists($outputTemp) || filesize($outputTemp) === 0) {
+            $msg = "Script Python no generó output válido";
+            Log::error("❌ " . $msg, [
+                'output_exists' => file_exists($outputTemp),
+                'output_size' => file_exists($outputTemp) ? filesize($outputTemp) : 0,
+                'stdout' => $stdout
+            ]);
             $image->update(['status' => 'error']);
             @unlink($originalTemp);
             @unlink($outputTemp);
-            $this->handleBatchError($batchId, "Archivo procesado vacío para imagen ID {$image->id}");
+            $this->handleBatchError($batchId, $msg);
             return $image;
         }
 
         try {
+            // ✅ Subir imagen procesada
+            Log::debug("⬆️ Subiendo imagen procesada a Wasabi...");
             $wasabiDisk->put($wasabiProcessedPath, file_get_contents($outputTemp));
 
-            // ✅ Verificar que se subió correctamente
             if (!$wasabiDisk->exists($wasabiProcessedPath)) {
                 throw new \Exception("El archivo no existe en Wasabi después de subirlo");
             }
 
+            Log::debug("✅ Imagen subida a Wasabi correctamente");
+
         } catch (\Throwable $e) {
-            Log::error("❌ No se pudo subir imagen procesada", ['path' => $wasabiProcessedPath, 'error' => $e->getMessage()]);
+            $msg = "Error subiendo imagen procesada: " . $e->getMessage();
+            Log::error("❌ " . $msg);
             $image->update(['status' => 'error']);
             @unlink($originalTemp);
             @unlink($outputTemp);
-            $this->handleBatchError($batchId, "Upload Wasabi falló en imagen ID {$image->id}: " . $e->getMessage());
+            $this->handleBatchError($batchId, $msg);
             return $image;
         }
 
@@ -143,23 +232,26 @@ class ImageProcessingService
         @unlink($originalTemp);
         @unlink($outputTemp);
 
-        // Parsear JSON
-        $jsonData = json_decode(implode('', $output), true);
+        // ✅ Parsear JSON output
+        Log::debug("📊 Parseando output JSON del script...");
+        $jsonData = json_decode($stdout, true);
         if (json_last_error() !== JSON_ERROR_NONE || !$jsonData) {
-            Log::error("❌ Error parseando JSON en imagen ID {$image->id}", [
-                'output' => $output,
+            $msg = "Error parseando JSON: " . json_last_error_msg();
+            Log::error("❌ " . $msg, [
+                'stdout' => $stdout,
                 'json_error' => json_last_error_msg()
             ]);
             $image->update(['status' => 'error']);
-            $this->handleBatchError($batchId, "JSON inválido para imagen ID {$image->id}: " . json_last_error_msg());
+            $this->handleBatchError($batchId, $msg);
             return $image;
         }
 
         try {
-            // Guardar datos
+            // ✅ Guardar datos en base de datos
+            Log::debug("💾 Guardando datos en base de datos...");
+
             $processed = $image->processedImage ?? new ProcessedImage();
             $processed->corrected_path = $wasabiProcessedPath;
-         //   $processed->status = 'completed'; // ✅ Marcar como completado
             $image->processedImage()->save($processed);
 
             $analysis = $image->analysisResult ?? new ImageAnalysisResult();
@@ -175,35 +267,26 @@ class ImageProcessingService
             $image->update(['status' => 'processed']);
             $image->load(['processedImage', 'analysisResult']);
 
-            Log::info("✅ Imagen ID {$image->id} procesada y almacenada correctamente");
+            Log::info("✅ Imagen {$image->id} procesada correctamente");
 
-            // ✅ Incrementar batch con mejor logging y verificación de finalización
+            // ✅ Incrementar batch
             if ($batchId) {
                 $batch = \App\Models\ImageBatch::find($batchId);
                 if ($batch) {
                     $oldProcessed = $batch->processed;
                     $batch->increment('processed');
-                    $batch->touch(); // Actualizar timestamp
-                    $batch->refresh();
-
-                    Log::info("🟢 Batch {$batch->id}: processed {$oldProcessed} → {$batch->processed}");
-
-                    // Verificar si el batch está completo
-                    $totalProcessed = $batch->processed + ($batch->errors ?? 0);
-                    if ($totalProcessed >= $batch->total) {
-                        $finalStatus = ($batch->errors ?? 0) > 0 ? 'completed_with_errors' : 'completed';
-                        $batch->update(['status' => $finalStatus]);
-                        Log::info("🎉 Batch {$batch->id} completado con status: {$finalStatus} ({$batch->processed} exitosas, {$batch->errors} errores)");
-                    }
+                    $batch->touch();
+                    Log::debug("📊 Batch {$batch->id}: processed {$oldProcessed} → {$batch->processed}");
                 }
             }
 
             return $image;
 
         } catch (\Throwable $e) {
-            Log::error("❌ Error guardando datos para imagen ID {$image->id}", ['error' => $e->getMessage()]);
+            $msg = "Error guardando datos: " . $e->getMessage();
+            Log::error("❌ " . $msg);
             $image->update(['status' => 'error']);
-            $this->handleBatchError($batchId, "Error guardando datos para imagen ID {$image->id}: " . $e->getMessage());
+            $this->handleBatchError($batchId, $msg);
             return $image;
         }
     }
