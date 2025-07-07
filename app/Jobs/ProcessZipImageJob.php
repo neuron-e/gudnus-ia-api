@@ -99,7 +99,7 @@ class ProcessZipImageJob implements ShouldQueue
             $this->incrementError($batch, $e->getMessage());
         }
 
-        $this->finalizeIfFinished($batch);
+        //$this->finalizeIfFinished($batch);
     }
 
     private function incrementError(ImageBatch $batch, string $message): void
@@ -115,7 +115,7 @@ class ProcessZipImageJob implements ShouldQueue
     private function finalizeIfFinished(ImageBatch $batch): void
     {
         $batch->refresh();
-        $expected = $batch->expected_total ?? $batch->total;
+        $expected = $batch->dispatched_total > 0 ? $batch->dispatched_total : ($batch->expected_total ?? $batch->total);
 
         if (($batch->processed + $batch->errors) >= $expected) {
             $status = match (true) {

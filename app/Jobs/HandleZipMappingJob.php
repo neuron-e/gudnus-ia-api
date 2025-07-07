@@ -81,7 +81,7 @@ class HandleZipMappingJob implements ShouldQueue
                     ))->onQueue('images');
                 }
             }
-
+            $batch->update(['dispatched_total' => count($this->mapping)]);
             // ✅ Programar job de finalización después de todos los sub-jobs
             dispatch(new FinalizeBatchJob($this->batchId))->delay(now()->addMinutes(10));
 
