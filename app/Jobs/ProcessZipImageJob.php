@@ -11,6 +11,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
@@ -41,9 +42,9 @@ class ProcessZipImageJob implements ShouldQueue
         Log::debug("📥 Procesando imagen ZIP: {$nombreImagen} → {$moduloPath}");
 
         $extractedFile = null;
-        foreach (Storage::allFiles($this->tempPath) as $filePath) {
-            if (strtolower(basename($filePath)) === strtolower($nombreImagen)) {
-                $extractedFile = storage_path("app/{$filePath}");
+        foreach (File::allFiles($this->tempPath) as $file) {
+            if (strtolower($file->getFilename()) === strtolower($nombreImagen)) {
+                $extractedFile = $file->getPathname();
                 break;
             }
         }
