@@ -5,8 +5,7 @@ namespace App\Jobs;
 use App\Models\Folder;
 use App\Models\Image;
 use App\Models\ImageBatch;
-use App\Models\ProcessedImage;
-use App\Models\ImageAnalysisResult;
+use App\Services\ImageProcessingService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -20,7 +19,7 @@ class HandleZipMappingJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $timeout = 3600;
+    public $timeout = 3600; // 1 hora para lotes grandes
     public $tries = 2;
 
     public function __construct(
@@ -33,192 +32,186 @@ class HandleZipMappingJob implements ShouldQueue
     public function handle()
     {
         $batch = ImageBatch::find($this->batchId);
-        if (!$batch) {
-            Log::error("❌ Batch {$this->batchId} no encontrado");
-            return;
-        }
+        if (!$batch) return;
 
-        Log::info("🚀 Iniciando HandleZipMappingJob para batch {$this->batchId} con " . count($this->mapping) . " asignaciones");
-
-        $batch->update(['status' => 'processing']);
-        $processedCount = 0;
-        $errorCount = 0;
+        $asignadas = 0;
+        $errores = 0;
         $errorMessages = [];
 
         try {
+            $batch->update(['status' => 'processing']);
+            Log::info("🚀 Iniciando HandleZipMappingJob para batch {$this->batchId} con " . count($this->mapping) . " asignaciones");
+
             foreach ($this->mapping as $index => $asignacion) {
                 $nombreImagen = basename($asignacion['imagen']);
                 $moduloPath = trim($asignacion['modulo']);
                 $fullImagePath = $this->tempPath . '/' . $nombreImagen;
 
-                Log::debug("📝 Procesando [{$index}]: {$nombreImagen} -> {$moduloPath}");
+                // ✅ Logging detallado para debug
+                Log::debug("Procesando asignación {$index}: {$nombreImagen} -> {$moduloPath}");
 
-                // ✅ Verificaciones básicas
-                if (!file_exists($fullImagePath) || !is_file($fullImagePath)) {
-                    $errorMessages[] = "Archivo no encontrado o inválido: $nombreImagen";
-                    $errorCount++;
-                    $this->updateBatchError($batch);
+                // Verificaciones de archivo
+                if (!file_exists($fullImagePath)) {
+                    $errorMessages[] = "No se encontró la imagen: $nombreImagen";
+                    $errores++;
                     continue;
                 }
 
-                // ✅ Verificar extensión
+                if (!is_file($fullImagePath)) {
+                    $errorMessages[] = "El elemento '$nombreImagen' no es un archivo válido";
+                    $errores++;
+                    continue;
+                }
+
+                // Verificar extensión
                 $extension = strtolower(pathinfo($fullImagePath, PATHINFO_EXTENSION));
-                if (!in_array($extension, ['jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp'])) {
-                    $errorMessages[] = "Extensión no válida: $nombreImagen";
-                    $errorCount++;
-                    $this->updateBatchError($batch);
+                $allowedExtensions = ['jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp'];
+                if (!in_array($extension, $allowedExtensions)) {
+                    $errorMessages[] = "El archivo '$nombreImagen' no tiene una extensión de imagen válida";
+                    $errores++;
                     continue;
                 }
 
-                // ✅ Buscar carpeta
+                // Buscar carpeta
                 $folder = Folder::where('project_id', $this->projectId)
                     ->where('full_path', $moduloPath)
                     ->first();
 
                 if (!$folder) {
-                    $errorMessages[] = "Módulo no encontrado: $moduloPath";
-                    $errorCount++;
-                    $this->updateBatchError($batch);
+                    $errorMessages[] = "No se encontró el módulo para: $moduloPath";
+                    $errores++;
                     continue;
                 }
 
-                try {
-                    // ✅ Limpiar imágenes existentes
-                    $this->cleanExistingImages($folder);
+                // Eliminar imágenes existentes
+                foreach ($folder->images as $existing) {
+                    if (Storage::disk('wasabi')->exists($existing->original_path)) {
+                        Storage::disk('wasabi')->delete($existing->original_path);
+                    }
+                    if ($existing->processedImage && Storage::disk('wasabi')->exists($existing->processedImage->corrected_path)) {
+                        Storage::disk('wasabi')->delete($existing->processedImage->corrected_path);
+                    }
 
-                    // ✅ Crear y subir nueva imagen
+                    $existing->processedImage()?->delete();
+                    $existing->analysisResult()?->delete();
+                    $existing->delete();
+                }
+
+                try {
+                    if (!is_readable($fullImagePath)) {
+                        throw new \Exception("No se puede leer el archivo: $nombreImagen");
+                    }
+
                     $imageContent = file_get_contents($fullImagePath);
                     if ($imageContent === false) {
-                        throw new \Exception("No se pudo leer el archivo");
+                        throw new \Exception("Error al leer el contenido del archivo: $nombreImagen");
                     }
 
-                    $wasabiPath = "projects/{$this->projectId}/images/" . uniqid('zip_') . '_' . $nombreImagen;
-                    Storage::disk('wasabi')->put($wasabiPath, $imageContent);
+                    // ✅ Crear imagen usando el método existente del modelo
+                    Log::debug("🔧 Creando imagen {$nombreImagen} en folder {$folder->id}");
 
-                    $image = Image::create([
-                        'folder_id' => $folder->id,
-                        'project_id' => $this->projectId,
-                        'filename' => $nombreImagen,
-                        'original_path' => $wasabiPath,
-                        'status' => 'uploaded'
-                    ]);
+                    $image = $folder->storeImage($imageContent, $nombreImagen);
 
-                    Log::info("📁 Imagen creada: ID {$image->id}, archivo: {$nombreImagen}");
+                    Log::info("📁 Imagen creada con ID {$image->id}, archivo: {$nombreImagen}");
 
-                    // ✅ Procesar con ImageProcessingService
-                    $success = $this->processImageWithService($image);
+                    // ✅ Procesar imagen directamente con ImageProcessingService
+                    Log::debug("⚙️ Iniciando procesamiento de imagen {$image->id}");
 
-                    if ($success) {
-                        $processedCount++;
-                        $this->updateBatchSuccess($batch);
-                        Log::info("✅ [{$processedCount}] Imagen procesada: {$nombreImagen}");
-                    } else {
-                        $errorCount++;
-                        $errorMessages[] = "Error procesando: $nombreImagen";
-                        $this->updateBatchError($batch);
-                        Log::error("❌ Error procesando imagen: {$nombreImagen}");
+                    try {
+                        $imageProcessingService = app(ImageProcessingService::class);
+                        $processedImage = $imageProcessingService->process($image, $this->batchId);
+
+                        // ✅ Verificar resultado detalladamente
+                        if ($processedImage) {
+                            Log::debug("🔍 ImageProcessingService retornó:", [
+                                'image_id' => $processedImage->id,
+                                'status' => $processedImage->status ?? 'no_status',
+                                'has_processed_image' => !!$processedImage->processedImage,
+                                'has_analysis_result' => !!$processedImage->analysisResult
+                            ]);
+
+                            if ($processedImage->status === 'processed') {
+                                $asignadas++;
+                                Log::info("✅ [{$asignadas}] Imagen {$nombreImagen} (ID: {$image->id}) procesada correctamente");
+                            } else {
+                                $errores++;
+                                $errorMessages[] = "Error procesando imagen: $nombreImagen (status: {$processedImage->status})";
+                                Log::error("❌ Imagen {$nombreImagen} falló en procesamiento (status: {$processedImage->status})");
+                            }
+                        } else {
+                            $errores++;
+                            $errorMessages[] = "Error: ImageProcessingService retornó null para $nombreImagen";
+                            Log::error("❌ ImageProcessingService retornó null para imagen {$nombreImagen}");
+                        }
+
+                    } catch (\Exception $e) {
+                        $errores++;
+                        $errorMessages[] = "Exception procesando $nombreImagen: " . $e->getMessage();
+                        Log::error("❌ Exception en ImageProcessingService para {$nombreImagen}: " . $e->getMessage());
                     }
 
-                    // ✅ Log de progreso cada 25 imágenes
-                    if (($processedCount + $errorCount) % 25 === 0) {
+                    // ✅ Actualizar progreso cada 25 imágenes
+                    if (($asignadas + $errores) % 25 === 0) {
                         $batch->refresh();
-                        Log::info("📊 Progreso: {$batch->processed}/{$batch->total} procesadas, {$batch->errors} errores");
+                        Log::info("📊 Progreso batch {$this->batchId}: {$batch->processed} procesadas DB, {$batch->errors} errores DB, locales: {$asignadas} exitosas, {$errores} errores");
                     }
 
                 } catch (\Exception $e) {
-                    $errorCount++;
-                    $errorMessages[] = "Error con imagen $nombreImagen: " . $e->getMessage();
-                    $this->updateBatchError($batch);
-                    Log::error("❌ Exception procesando {$nombreImagen}: " . $e->getMessage());
+                    Log::error("Error asignando imagen $nombreImagen: " . $e->getMessage());
+                    $errores++;
+                    $errorMessages[] = "Error interno al asignar imagen: $nombreImagen - " . $e->getMessage();
+
+                    // ✅ Como el ImageProcessingService maneja el batch automáticamente,
+                    // solo actualizamos errores si la imagen ni siquiera se pudo crear
+                    $batch->increment('errors');
+                    $batch->touch();
                 }
             }
 
-            // ✅ Finalización
-            $this->finalizeBatch($batch, $errorMessages);
-
-        } catch (\Throwable $e) {
-            Log::error("❌ Error crítico en HandleZipMappingJob: " . $e->getMessage());
-            $batch->update([
-                'status' => 'failed',
-                'error_messages' => array_merge($errorMessages, ["Error crítico: " . $e->getMessage()])
+            // ✅ Actualización final del batch con logging detallado
+            $batch->refresh();
+            Log::info("🔍 Estado final del batch antes de actualizar:", [
+                'batch_id' => $this->batchId,
+                'processed' => $batch->processed,
+                'errors' => $batch->errors ?? 0,
+                'total' => $batch->total,
+                'status' => $batch->status,
+                'local_asignadas' => $asignadas,
+                'local_errores' => $errores
             ]);
-        } finally {
-            // ✅ Cleanup
+
+            $totalProcesadas = $batch->processed;
+            $totalErrores = $batch->errors ?? 0;
+            $totalDone = $totalProcesadas + $totalErrores;
+
+            if ($totalErrores === 0 && $totalProcesadas > 0) {
+                $finalStatus = 'completed';
+            } elseif ($totalProcesadas > 0) {
+                $finalStatus = 'completed_with_errors';
+            } else {
+                $finalStatus = 'failed';
+            }
+
+            $batch->update([
+                'status' => $finalStatus,
+                'error_messages' => $errorMessages
+            ]);
+
+            // Cleanup
             if (File::exists($this->tempPath)) {
                 File::deleteDirectory($this->tempPath);
-                Log::info("🧹 Directorio temporal eliminado: {$this->tempPath}");
-            }
-        }
-    }
-
-    private function cleanExistingImages(Folder $folder): void
-    {
-        foreach ($folder->images as $existing) {
-            if (Storage::disk('wasabi')->exists($existing->original_path)) {
-                Storage::disk('wasabi')->delete($existing->original_path);
-            }
-            if ($existing->processedImage && Storage::disk('wasabi')->exists($existing->processedImage->corrected_path)) {
-                Storage::disk('wasabi')->delete($existing->processedImage->corrected_path);
             }
 
-            $existing->processedImage()?->delete();
-            $existing->analysisResult()?->delete();
-            $existing->delete();
+            Log::info("🎉 HandleZipMappingJob completado. Batch {$this->batchId}: {$totalProcesadas} procesadas, {$totalErrores} errores, estado: {$finalStatus}");
+
+        } catch (\Throwable $e) {
+            Log::error("❌ Error crítico en HandleZipMappingJob batch {$this->batchId}: " . $e->getMessage());
+
+            $batch->update([
+                'status' => 'failed',
+                'error_messages' => array_merge($errorMessages ?? [], ["Error crítico: " . $e->getMessage()])
+            ]);
         }
-    }
-
-    private function processImageWithService(Image $image): bool
-    {
-        try {
-            $imageProcessingService = app(\App\Services\ImageProcessingService::class);
-            $result = $imageProcessingService->process($image);
-
-            return $result && $result->status !== 'error';
-        } catch (\Exception $e) {
-            Log::error("Error en ImageProcessingService para imagen {$image->id}: " . $e->getMessage());
-            return false;
-        }
-    }
-
-    private function updateBatchSuccess(ImageBatch $batch): void
-    {
-        $batch->increment('processed');
-        $batch->touch();
-    }
-
-    private function updateBatchError(ImageBatch $batch): void
-    {
-        $batch->increment('errors');
-        $batch->touch();
-    }
-
-    private function finalizeBatch(ImageBatch $batch, array $errorMessages): void
-    {
-        $batch->refresh();
-
-        $totalProcessed = $batch->processed;
-        $totalErrors = $batch->errors ?? 0;
-
-        Log::info("🔍 Estado final del batch {$batch->id}:", [
-            'processed' => $totalProcessed,
-            'errors' => $totalErrors,
-            'total' => $batch->total
-        ]);
-
-        if ($totalErrors === 0 && $totalProcessed > 0) {
-            $finalStatus = 'completed';
-        } elseif ($totalProcessed > 0) {
-            $finalStatus = 'completed_with_errors';
-        } else {
-            $finalStatus = 'failed';
-        }
-
-        $batch->update([
-            'status' => $finalStatus,
-            'error_messages' => $errorMessages
-        ]);
-
-        Log::info("🎉 Batch {$batch->id} finalizado: {$totalProcessed} procesadas, {$totalErrors} errores, estado: {$finalStatus}");
     }
 
     public function failed(\Throwable $exception): void
