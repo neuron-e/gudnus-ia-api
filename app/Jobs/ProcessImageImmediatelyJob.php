@@ -127,30 +127,27 @@ class ProcessImageImmediatelyJob implements ShouldQueue
 
             // ✅ Llamada a Azure con mejor manejo de errores y reintentos
             $response = Http::timeout(90) // ✅ Timeout más generoso
-            ->retry(3, function ($exception, $request) {
+            ->retry(3, 1000, function ($exception, $request) {
                 // ✅ Retry en timeouts y errores 5xx
                 if ($exception instanceof \Illuminate\Http\Client\ConnectionException) {
                     Log::warning("🔄 Reintentando por error de conexión: " . $exception->getMessage());
-                    sleep(2); // Pausa antes de reintento
                     return true;
                 }
 
                 if ($exception instanceof \Illuminate\Http\Client\RequestException) {
                     $status = $exception->response?->status() ?? 0;
                     if ($status >= 500 || $status === 429) {
-                        $delay = $status === 429 ? 10 : 5; // Más delay para rate limiting
-                        Log::warning("🔄 Reintentando por status {$status}, esperando {$delay}s");
-                        sleep($delay);
+                        Log::warning("🔄 Reintentando por status {$status}");
                         return true;
                     }
                 }
 
                 return false;
-            }, 1000) // 1 segundo entre reintentos del Http::retry
-            ->withHeaders([
-                'Prediction-Key' => env('AZURE_PREDICTION_KEY'),
-                'Content-Type' => 'application/octet-stream',
-            ])
+            })
+                ->withHeaders([
+                    'Prediction-Key' => env('AZURE_PREDICTION_KEY'),
+                    'Content-Type' => 'application/octet-stream',
+                ])
                 ->withBody($imageContent, 'application/octet-stream')
                 ->post(env('AZURE_PREDICTION_FULL_ENDPOINT'));
 
@@ -169,9 +166,14 @@ class ProcessImageImmediatelyJob implements ShouldQueue
                     $retryAfter = $response->header('Retry-After', 60);
                     Log::warning("⚠️ Rate limit alcanzado para imagen {$image->id}, retry after: {$retryAfter}s");
 
-                    // ✅ Re-encolar el job con delay
-                    $this->release(now()->addSeconds($retryAfter + rand(5, 15)));
-                    return false;
+                    // ✅ Re-encolar el job con delay (solo si no hemos agotado los intentos)
+                    if ($this->attempts() < $this->tries) {
+                        $this->release(now()->addSeconds($retryAfter + rand(5, 15)));
+                        return false;
+                    } else {
+                        Log::error("💀 Rate limit agotado para imagen {$image->id} después de {$this->attempts()} intentos");
+                        return false;
+                    }
                 }
 
                 // ✅ Errores temporales de Azure
@@ -243,7 +245,23 @@ class ProcessImageImmediatelyJob implements ShouldQueue
         if ($this->batchId) {
             $batch = AnalysisBatch::find($this->batchId);
             if ($batch) {
-                $batch->touch(); // Actualizar timestamp para indicar actividad
+                // ✅ Incrementar un contador de errores en el batch
+                $errors = $batch->errors ?? 0;
+                $batch->update([
+                    'errors' => $errors + 1,
+                    'updated_at' => now()
+                ]);
+
+                $totalErrors = $errors + 1;
+
+                // ✅ Si hay demasiados errores (>20% del total), marcar como fallido
+                $errorRate = ($errors + 1) / $batch->total_images;
+                if ($errorRate > 0.2) {
+                    Log::critical("💀 Batch {$batch->id} tiene demasiados errores ({$errorRate}), marcando como fallido");
+                    $batch->update(['status' => 'failed']);
+                } else {
+                    Log::info("📊 Batch {$batch->id}: {$totalErrors} errores de {$batch->total_images} ({$errorRate}%)");
+                }
             }
         }
     }

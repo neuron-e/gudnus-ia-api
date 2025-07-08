@@ -155,13 +155,21 @@ class AnalysisBatchController extends Controller
             // Para analysis batch, verificar imágenes procesadas vs no procesadas
             $imageIds = is_string($batch->image_ids) ? json_decode($batch->image_ids, true) : $batch->image_ids;
             $processedCount = Image::whereIn('id', $imageIds)->where('is_processed', true)->count();
-            $pendingCount = count($imageIds) - $processedCount;
+            $pendingCount = count($imageIds) - $processedCount - ($batch->errors ?? 0);
+
+            // ✅ Calcular progreso incluyendo errores
+            $totalCompleted = $processedCount + ($batch->errors ?? 0);
+            $progress = count($imageIds) > 0 ? round(($totalCompleted / count($imageIds)) * 100, 1) : 0;
 
             return response()->json([
                 'batch' => $batch,
-                'pending_count' => $pendingCount,
+                'pending_count' => max(0, $pendingCount), // ✅ Asegurar que no sea negativo
                 'processed_count' => $processedCount,
-                'is_stuck' => $batch->updated_at < Carbon::now()->subMinutes(30)
+                'error_count' => $batch->errors ?? 0, // ✅ Agregar conteo de errores
+                'total_completed' => $totalCompleted, // ✅ Total procesado + errores
+                'progress' => $progress, // ✅ Progreso real
+                'is_stuck' => $batch->updated_at < Carbon::now()->subMinutes(30),
+                'error_rate' => count($imageIds) > 0 ? round((($batch->errors ?? 0) / count($imageIds)) * 100, 1) : 0 // ✅ Tasa de error
             ]);
         } else {
             $batch = ImageBatch::findOrFail($batchId);

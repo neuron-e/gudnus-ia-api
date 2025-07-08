@@ -27,22 +27,25 @@ class CheckBatchCompletionJob implements ShouldQueue
 
     public function handle()
     {
-        $batch = AnalysisBatch::find($this.batchId);
+        $batch = AnalysisBatch::find($this->batchId);
         if (!$batch) {
             Log::error("❌ Batch {$this->batchId} no encontrado para verificación");
             return;
         }
 
         $totalProcessed = $batch->processed_images;
+        $totalErrors = $batch->errors ?? 0;
+        $totalCompleted = $totalProcessed + $totalErrors; // ✅ Incluir errores en el total
         $totalExpected = $batch->total_images;
 
-        Log::info("🔍 Verificando batch {$batch->id}: {$totalProcessed}/{$totalExpected} procesadas (intento {$this->checkAttempt})");
+        Log::info("🔍 Verificando batch {$batch->id}: {$totalProcessed} procesadas, {$totalErrors} errores, {$totalCompleted}/{$totalExpected} total (intento {$this->checkAttempt})");
 
-        if ($totalProcessed >= $totalExpected) {
+        if ($totalCompleted >= $totalExpected) {
             // ✅ Batch completado
-            $batch->update(['status' => 'completed']);
+            $finalStatus = $totalErrors > 0 ? 'completed_with_errors' : 'completed';
+            $batch->update(['status' => $finalStatus]);
 
-            if ($this->notifyEmail) {
+            if ($this->notifyEmail && $totalProcessed > 0) {
                 try {
                     Mail::to($this->notifyEmail)->send(new ImagesProcessedMail($totalProcessed));
                     Log::info("📧 Email de notificación enviado a: {$this->notifyEmail}");
@@ -51,7 +54,7 @@ class CheckBatchCompletionJob implements ShouldQueue
                 }
             }
 
-            Log::info("🎉 Batch de análisis IA {$batch->id} completado: {$totalProcessed} imágenes procesadas");
+            Log::info("🎉 Batch de análisis IA {$batch->id} completado como {$finalStatus}: {$totalProcessed} procesadas, {$totalErrors} errores");
         } else if ($this->checkAttempt < 10) {
             // ✅ Aún no completado, reprogramar verificación
             $nextDelay = min($this->checkAttempt * 30, 300); // Max 5 minutos

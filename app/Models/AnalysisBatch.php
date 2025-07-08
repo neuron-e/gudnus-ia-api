@@ -13,6 +13,7 @@ class AnalysisBatch extends Model
         'image_ids',
         'total_images',
         'processed_images',
+        'errors', // ✅ Agregado
         'status'
     ];
 
