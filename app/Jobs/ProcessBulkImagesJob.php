@@ -4,97 +4,79 @@ namespace App\Jobs;
 
 use App\Mail\ImagesProcessedMail;
 use App\Models\AnalysisBatch;
-use App\Models\ImageAnalysisResult;
-use App\Models\ProcessedImage;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
-use Illuminate\Support\Facades\Storage;
 
 class ProcessBulkImagesJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    public $timeout = 300; // ✅ Reducido a 5 minutos por chunk
+    public $tries = 3; // ✅ Más reintentos
+    public $maxExceptions = 3;
+
+    // ✅ Backoff exponencial para reintentos
+    public function backoff(): array
+    {
+        return [30, 120, 300]; // 30s, 2min, 5min
+    }
+
     public function __construct(
-        public array $imageIds,
+        public array $imageIds, // ✅ Ahora maneja chunks más pequeños
         public ?string $notifyEmail = null,
-        public ?int $batchId = null
+        public ?int $batchId = null,
+        public int $chunkIndex = 0,
+        public int $totalChunks = 1
     ) {}
 
     public function handle()
     {
-        $images = ProcessedImage::with('image')->whereIn('image_id', $this->imageIds)->get();
+        $chunkSize = count($this->imageIds);
+        Log::info("🤖 Iniciando chunk {$this->chunkIndex}/{$this->totalChunks} de análisis IA para {$chunkSize} imágenes");
+
         $batch = $this->batchId ? AnalysisBatch::find($this->batchId) : null;
 
-        foreach ($images as $processed) {
-            $image = $processed->image;
-            $wasabiDisk = Storage::disk('wasabi');
-
-            if (!$processed->corrected_path || !$wasabiDisk->exists($processed->corrected_path)) continue;
-
-            // Descargar temporalmente
-            $tempPath = storage_path('app/tmp/' . uniqid('wasabi_', true) . '.jpg');
-            file_put_contents($tempPath, $wasabiDisk->get($processed->corrected_path));
-
-            try {
-                $response = Http::withHeaders([
-                    'Prediction-Key' => env('AZURE_PREDICTION_KEY'),
-                    'Content-Type' => 'application/octet-stream',
-                ])->withBody(
-                    file_get_contents($tempPath),
-                    'application/octet-stream'
-                )->post(env('AZURE_PREDICTION_FULL_ENDPOINT'));
-
-                @unlink($tempPath); // limpieza
-
-                if ($response->successful()) {
-                    $json = $response->json();
-                    $mapping = [
-                        'Microgrietas' => 'microcracks_count',
-                        'Fingers' => 'finger_interruptions_count',
-                        'Black Edges' => 'black_edges_count',
-                        'Intensidad' => 'cells_with_different_intensity',
-                    ];
-
-                    $counts = [];
-                    foreach ($json['predictions'] as $prediction) {
-                        $tag = $prediction['tagName'];
-                        if (isset($mapping[$tag])) {
-                            $field = $mapping[$tag];
-                            $counts[$field] = ($counts[$field] ?? 0) + 1;
-                        }
-                    }
-
-                    $analysis = $image->analysisResult ?? new ImageAnalysisResult();
-                    $analysis->fill($counts);
-                    $image->analysisResult()->save($analysis);
-
-                    $processed->ai_response_json = json_encode($json);
-                    $processed->save();
-
-                    $image->update(['is_processed' => true]);
-
-                    // 🔁 Actualizar progreso del batch
-                    if ($batch) $batch->increment('processed_images');
-                }
-
-            } catch (\Throwable $e) {
-                Log::error("❌ Exception processing image {$image->id}", [
-                    'msg' => $e->getMessage()
-                ]);
-            }
+        if ($batch) {
+            $batch->touch();
+            Log::info("🚀 Procesando chunk de análisis IA {$batch->id}");
         }
 
-        // ✅ Comprobación final del batch
-        if ($batch && $batch->processed_images >= $batch->total_images) {
-            $batch->update(['status' => 'completed']);
-            if ($this->notifyEmail) {
-                Mail::to($this->notifyEmail)->send(new ImagesProcessedMail($batch->total_images));
+        // ✅ En lugar de procesar todas aquí, despachar jobs individuales
+        foreach ($this->imageIds as $index => $imageId) {
+            // ✅ Delay progresivo para evitar rate limiting
+            $delay = $index * 2; // 2 segundos entre cada job
+
+            ProcessImageImmediatelyJob::dispatch($imageId, $this->batchId)
+                ->delay(now()->addSeconds($delay))
+                ->onQueue('analysis');
+        }
+
+        Log::info("✅ Despachados {$chunkSize} jobs individuales para chunk {$this->chunkIndex}");
+
+        // ✅ Solo enviar email en el último chunk
+        if ($this->chunkIndex === $this->totalChunks - 1 && $this->notifyEmail && $batch) {
+            // ✅ Programar verificación de completado después de procesar todos los jobs
+            $estimatedTime = count($this->imageIds) * 3; // 3 segundos por imagen estimado
+            CheckBatchCompletionJob::dispatch($batch->id, $this->notifyEmail)
+                ->delay(now()->addSeconds($estimatedTime + 60)); // +1 minuto de buffer
+        }
+    }
+
+    public function failed(\Throwable $exception): void
+    {
+        Log::error("❌ ProcessBulkImagesJob chunk {$this->chunkIndex} falló: " . $exception->getMessage());
+
+        if ($this->batchId) {
+            $batch = AnalysisBatch::find($this->batchId);
+            if ($batch && $this->chunkIndex === $this->totalChunks - 1) {
+                // Solo marcar como fallido si es el último chunk
+                $batch->update(['status' => 'failed']);
+                Log::error("❌ Batch de análisis IA {$batch->id} marcado como fallido");
             }
         }
     }

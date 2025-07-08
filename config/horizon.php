@@ -212,6 +212,19 @@ return [
                 'tries' => 3,
                 'timeout' => 900,
             ],
+            // ✅ Nueva cola específica para análisis IA con configuración optimizada
+            'supervisor-analysis' => [
+                'connection' => 'redis',
+                'queue' => ['analysis'],
+                'balance' => 'simple',
+                'processes' => 8, // ✅ Más workers para análisis IA
+                'tries' => 4, // ✅ Más reintentos
+                'timeout' => 300, // ✅ 5 minutos por job individual
+                'memory' => 256, // ✅ Más memoria para análisis
+                'sleep' => 3, // ✅ Pausa entre jobs para rate limiting
+                'maxJobs' => 100, // ✅ Restart workers después de 100 jobs
+                'rest' => 30, // ✅ Pausa de 30s al reiniciar workers
+            ],
             'supervisor-heavy' => [
                 'connection' => 'redis',
                 'queue' => ['heavy-tasks'],

@@ -2,10 +2,9 @@
 
 namespace App\Jobs;
 
-use App\Mail\ImagesProcessedMail;
 use App\Models\AnalysisBatch;
 use App\Models\ImageAnalysisResult;
-use App\Models\ProcessedImage;
+use App\Models\Image;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -13,169 +12,188 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 
 class ProcessImageImmediatelyJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    // ✅ Timeouts ajustados para análisis IA masivo
-    public $timeout = 1800; // 30 minutos para lotes grandes (Azure puede ser lento)
-    public $tries = 2; // Solo 2 intentos para análisis IA (es costoso)
+    public $timeout = 180; // ✅ 3 minutos por imagen
+    public $tries = 4; // ✅ Más reintentos
+    public $maxExceptions = 3;
+
+    // ✅ Backoff exponencial con jitter
+    public function backoff(): array
+    {
+        return [
+            10 + rand(0, 10),   // 10-20s
+            30 + rand(0, 30),   // 30-60s
+            90 + rand(0, 60),   // 90-150s
+            300 + rand(0, 120)  // 300-420s
+        ];
+    }
 
     public function __construct(
-        public array $imageIds,
-        public ?string $notifyEmail = null,
+        public int $imageId,
         public ?int $batchId = null
     ) {}
 
     public function handle()
     {
+        Log::info("🤖 Iniciando análisis IA para imagen {$this->imageId} (intento {$this->attempts()})");
+
+        $image = Image::with(['processedImage', 'analysisResult'])->find($this->imageId);
+        if (!$image) {
+            Log::error("❌ Imagen {$this->imageId} no encontrada");
+            return;
+        }
+
         $batch = $this->batchId ? AnalysisBatch::find($this->batchId) : null;
 
-        // ✅ Marcar batch como activo al inicio
-        if ($batch) {
-            $batch->touch();
-            Log::info("🚀 Iniciando análisis IA para batch {$batch->id} con {$batch->total_images} imágenes");
-        }
+        try {
+            $result = $this->processImageWithAI($image);
 
-        $images = ProcessedImage::with('image')->whereIn('image_id', $this->imageIds)->get();
-        $processedCount = 0;
-        $errorCount = 0;
-        $errorMessages = [];
+            if ($result) {
+                Log::info("✅ Imagen {$this->imageId} analizada exitosamente con IA");
 
-        foreach ($images as $processed) {
-            try {
-                $result = $this->processImage($processed, $batch);
-                if ($result) {
-                    $processedCount++;
-                } else {
-                    $errorCount++;
-                }
+                // ✅ Actualizar batch si existe
+                if ($batch) {
+                    $batch->increment('processed_images');
+                    $batch->touch();
 
-                // ✅ Actualizar progreso cada 10 imágenes o al final
-                if (($processedCount + $errorCount) % 10 === 0 || ($processedCount + $errorCount) === count($images)) {
-                    if ($batch) {
-                        $batch->touch(); // Mantener el batch activo
-                        Log::debug("📊 Progreso batch {$batch->id}: {$batch->processed_images} completadas, $errorCount errores");
-                    }
-                }
-
-                // ✅ Rate limiting para Azure (evitar 429 errors)
-                if (count($images) > 50) {
-                    usleep(100000); // 100ms de pausa entre requests para lotes grandes
-                }
-
-            } catch (\Throwable $e) {
-                $errorCount++;
-                $errorMessage = "Error procesando imagen {$processed->image_id}: " . $e->getMessage();
-                $errorMessages[] = $errorMessage;
-                Log::error("❌ $errorMessage");
-
-                // ✅ Marcar imagen individual como fallida
-                $processed->image?->update(['is_processed' => false]);
-            }
-        }
-
-        // ✅ Verificación final y actualización del batch
-        if ($batch) {
-            $batch->refresh();
-            $totalProcessed = $batch->processed_images;
-
-            // Determinar estado final
-            if ($totalProcessed >= $batch->total_images) {
-                $finalStatus = $errorCount > 0 ? 'completed_with_errors' : 'completed';
-                $batch->update(['status' => $finalStatus]);
-
-                Log::info("🎉 Batch {$batch->id} completado: $totalProcessed procesadas, $errorCount errores, estado: $finalStatus");
-
-                // Enviar email de notificación
-                if ($this->notifyEmail && $totalProcessed > 0) {
-                    try {
-                        Mail::to($this->notifyEmail)->send(new ImagesProcessedMail($totalProcessed));
-                    } catch (\Throwable $e) {
-                        Log::warning("⚠️ No se pudo enviar email de notificación: " . $e->getMessage());
+                    // ✅ Log de progreso cada 10 imágenes
+                    if ($batch->processed_images % 10 === 0) {
+                        $progress = round(($batch->processed_images / $batch->total_images) * 100, 1);
+                        Log::info("📊 Progreso batch {$batch->id}: {$batch->processed_images}/{$batch->total_images} ({$progress}%)");
                     }
                 }
             } else {
-                Log::info("📊 Batch {$batch->id} en progreso: {$totalProcessed}/{$batch->total_images} procesadas");
+                Log::error("❌ Error analizando imagen {$this->imageId} con IA");
+                $this->handleProcessingError($batch, "Error en processImageWithAI");
             }
 
-            // ✅ Guardar errores en el batch si los hay (aunque AnalysisBatch no tiene error_messages)
-            if (!empty($errorMessages)) {
-                Log::warning("⚠️ Errores en batch {$batch->id}: " . implode('; ', array_slice($errorMessages, 0, 5)));
-            }
+        } catch (\Throwable $e) {
+            Log::error("❌ Exception analizando imagen {$this->imageId}: " . $e->getMessage());
+            $this->handleProcessingError($batch, $e->getMessage());
+        }
+    }
+
+    private function handleProcessingError(?AnalysisBatch $batch, string $error): void
+    {
+        if ($batch) {
+            // ✅ No incrementar processed_images en caso de error
+            $batch->touch(); // Solo actualizar timestamp
         }
 
-        Log::info("✅ Job de análisis IA completado: $processedCount exitosas, $errorCount errores");
+        // ✅ Si es el último intento, loguear como error crítico
+        if ($this->attempts() >= $this->tries) {
+            Log::critical("💀 Imagen {$this->imageId} falló definitivamente después de {$this->attempts()} intentos: {$error}");
+        }
     }
 
     /**
-     * ✅ Procesar una imagen individual
+     * ✅ Procesar una imagen con análisis IA de Azure (con manejo mejorado de errores)
      */
-    private function processImage(ProcessedImage $processed, ?AnalysisBatch $batch): bool
+    private function processImageWithAI(Image $image): bool
     {
-        $image = $processed->image;
-        $wasabiDisk = Storage::disk('wasabi');
-
-        // Verificaciones previas
-        if (!$processed->corrected_path || !$wasabiDisk->exists($processed->corrected_path)) {
-            Log::warning("⚠️ Imagen {$image->id}: no tiene path corregido o no existe en Wasabi");
+        // ✅ Verificar que tiene imagen procesada (recortada)
+        if (!$image->processedImage || !$image->processedImage->corrected_path) {
+            Log::warning("⚠️ Imagen {$image->id}: no ha sido recortada, no se puede analizar con IA");
             return false;
         }
 
-        if ($image->is_processed) {
-            Log::debug("ℹ️ Imagen {$image->id} ya está procesada, saltando...");
-            return true; // Ya procesada, contar como éxito
+        $correctedPath = $image->processedImage->corrected_path;
+
+        if (!Storage::disk('wasabi')->exists($correctedPath)) {
+            Log::warning("⚠️ Imagen {$image->id}: archivo recortado no existe en Wasabi: {$correctedPath}");
+            return false;
         }
 
-        $tempPath = null;
+        // ✅ Si ya está procesada con IA, saltarla
+        if ($image->is_processed) {
+            Log::debug("ℹ️ Imagen {$image->id} ya está procesada con IA");
+            return true;
+        }
+
         try {
-            // ✅ Descargar con ID único para evitar colisiones
-            $tempPath = storage_path('app/tmp/' . uniqid('azure_analysis_', true) . '.jpg');
-            $imageContent = $wasabiDisk->get($processed->corrected_path);
+            // ✅ Obtener contenido de la imagen
+            $imageContent = Storage::disk('wasabi')->get($correctedPath);
 
-            if (!$imageContent) {
-                throw new \Exception("No se pudo descargar el contenido de la imagen desde Wasabi");
-            }
+            Log::debug("🤖 Enviando imagen {$image->id} a Azure para análisis IA", [
+                'file_path' => $correctedPath,
+                'size_bytes' => strlen($imageContent),
+                'attempt' => $this->attempts()
+            ]);
 
-            file_put_contents($tempPath, $imageContent);
+            // ✅ Llamada a Azure con mejor manejo de errores y reintentos
+            $response = Http::timeout(90) // ✅ Timeout más generoso
+            ->retry(3, function ($exception, $request) {
+                // ✅ Retry en timeouts y errores 5xx
+                if ($exception instanceof \Illuminate\Http\Client\ConnectionException) {
+                    Log::warning("🔄 Reintentando por error de conexión: " . $exception->getMessage());
+                    sleep(2); // Pausa antes de reintento
+                    return true;
+                }
 
-            // Verificar que el archivo se creó correctamente
-            if (!file_exists($tempPath) || filesize($tempPath) === 0) {
-                throw new \Exception("Archivo temporal está vacío o no se creó");
-            }
+                if ($exception instanceof \Illuminate\Http\Client\RequestException) {
+                    $status = $exception->response?->status() ?? 0;
+                    if ($status >= 500 || $status === 429) {
+                        $delay = $status === 429 ? 10 : 5; // Más delay para rate limiting
+                        Log::warning("🔄 Reintentando por status {$status}, esperando {$delay}s");
+                        sleep($delay);
+                        return true;
+                    }
+                }
 
-            // ✅ Llamada a Azure con mejor manejo de errores
-            $response = Http::timeout(60) // 60 segundos timeout por imagen
-            ->retry(2, 1000) // 2 reintentos con 1 segundo de espera
+                return false;
+            }, 1000) // 1 segundo entre reintentos del Http::retry
             ->withHeaders([
                 'Prediction-Key' => env('AZURE_PREDICTION_KEY'),
                 'Content-Type' => 'application/octet-stream',
             ])
-                ->withBody(file_get_contents($tempPath), 'application/octet-stream')
+                ->withBody($imageContent, 'application/octet-stream')
                 ->post(env('AZURE_PREDICTION_FULL_ENDPOINT'));
 
             if (!$response->successful()) {
                 $statusCode = $response->status();
-                $errorBody = $response->body();
+                $responseBody = $response->body();
 
+                Log::error("❌ Azure prediction failed para imagen {$image->id}", [
+                    'status' => $statusCode,
+                    'body' => $responseBody,
+                    'attempt' => $this->attempts()
+                ]);
+
+                // ✅ Rate limiting específico
                 if ($statusCode === 429) {
-                    Log::warning("⚠️ Rate limit alcanzado en Azure para imagen {$image->id}, reintentando en 5 segundos...");
-                    sleep(5); // Esperar antes de reintentar
-                    throw new \Exception("Rate limit de Azure alcanzado");
+                    $retryAfter = $response->header('Retry-After', 60);
+                    Log::warning("⚠️ Rate limit alcanzado para imagen {$image->id}, retry after: {$retryAfter}s");
+
+                    // ✅ Re-encolar el job con delay
+                    $this->release(now()->addSeconds($retryAfter + rand(5, 15)));
+                    return false;
                 }
 
-                throw new \Exception("Azure API error {$statusCode}: $errorBody");
+                // ✅ Errores temporales de Azure
+                if ($statusCode >= 500) {
+                    throw new \Exception("Azure server error {$statusCode}: {$responseBody}");
+                }
+
+                // ✅ Errores de cliente (4xx) - no reintentar
+                Log::error("💀 Error cliente Azure {$statusCode} para imagen {$image->id}, no reintentando");
+                return false;
             }
 
             $json = $response->json();
             if (!$json || !isset($json['predictions'])) {
-                throw new \Exception("Respuesta de Azure inválida o sin predictions");
+                throw new \Exception("Respuesta de Azure inválida o vacía");
             }
 
-            // ✅ Procesar respuesta y guardar datos
+            Log::debug("✅ Azure prediction response para imagen {$image->id}", [
+                'predictions_count' => count($json['predictions'])
+            ]);
+
+            // ✅ Procesar respuesta (mismo mapeo que en controller)
             $mapping = [
                 'Microgrietas' => 'microcracks_count',
                 'Fingers' => 'finger_interruptions_count',
@@ -192,80 +210,41 @@ class ProcessImageImmediatelyJob implements ShouldQueue
                 }
             }
 
-            // Guardar análisis
+            // ✅ Guardar resultados
             $analysis = $image->analysisResult ?? new ImageAnalysisResult();
             $analysis->fill($counts);
             $image->analysisResult()->save($analysis);
 
-            // Guardar respuesta JSON
-            $processed->ai_response_json = json_encode($json);
-            $processed->save();
+            // ✅ Guardar respuesta JSON
+            $image->processedImage->ai_response_json = json_encode($json);
+            $image->processedImage->save();
 
-            // Marcar como procesada
+            // ✅ Marcar como procesada con IA
             $image->update(['is_processed' => true]);
 
-            // ✅ Incrementar contador del batch
-            if ($batch) {
-                $batch->increment('processed_images');
-            }
-
-            Log::debug("✅ Imagen {$image->id} analizada exitosamente");
+            Log::debug("✅ Análisis IA guardado para imagen {$image->id}", $counts);
             return true;
 
         } catch (\Throwable $e) {
-            Log::error("❌ Error analizando imagen {$image->id}: " . $e->getMessage());
-            return false;
-        } finally {
-            // ✅ Cleanup siempre se ejecuta
-            if ($tempPath && file_exists($tempPath)) {
-                @unlink($tempPath);
-            }
+            Log::error("❌ Error en análisis IA para imagen {$image->id}: " . $e->getMessage(), [
+                'attempt' => $this->attempts(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            // ✅ Re-throw para que el framework maneje el retry
+            throw $e;
         }
     }
 
-    /**
-     * ✅ Manejo de fallos del job completo
-     */
     public function failed(\Throwable $exception): void
     {
-        Log::error("❌ Job de análisis IA falló completamente: " . $exception->getMessage());
+        Log::error("❌ ProcessImageImmediatelyJob falló definitivamente para imagen {$this->imageId}: " . $exception->getMessage());
 
         if ($this->batchId) {
             $batch = AnalysisBatch::find($this->batchId);
             if ($batch) {
-                $batch->update(['status' => 'failed']);
-                Log::error("❌ Batch {$batch->id} marcado como fallido debido a fallo del job");
+                $batch->touch(); // Actualizar timestamp para indicar actividad
             }
-        }
-    }
-
-    /**
-     * ✅ Timeout dinámico basado en el número de imágenes
-     */
-    public function retryUntil()
-    {
-        $imageCount = count($this->imageIds);
-
-        if ($imageCount > 100) {
-            return now()->addHours(3); // 3 horas para lotes muy grandes
-        } elseif ($imageCount > 50) {
-            return now()->addHours(2); // 2 horas para lotes grandes
-        } else {
-            return now()->addHour(); // 1 hora para lotes pequeños
-        }
-    }
-
-    /**
-     * ✅ Backoff considerando rate limits de Azure
-     */
-    public function backoff()
-    {
-        $imageCount = count($this->imageIds);
-
-        if ($imageCount > 100) {
-            return [300, 900]; // 5min, 15min para lotes grandes (Azure rate limits)
-        } else {
-            return [120, 600]; // 2min, 10min para lotes normales
         }
     }
 }

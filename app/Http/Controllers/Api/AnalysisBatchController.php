@@ -10,6 +10,7 @@ use App\Models\Image;
 use App\Jobs\ProcessImageImmediatelyJob;
 use App\Jobs\ProcessBulkImagesJob;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 
@@ -195,35 +196,62 @@ class AnalysisBatchController extends Controller
     }
 
     /**
-     * Reintentar procesamiento de imágenes pendientes (recorte)
+     * ✅ Obtener estadísticas detalladas de un proyecto
+     */
+    public function getProjectAnalysisStats(Project $project)
+    {
+        $stats = DB::select("
+            SELECT
+                COUNT(*) as total_images,
+                COUNT(pi.id) as images_with_processed,
+                COUNT(CASE WHEN pi.corrected_path IS NOT NULL THEN 1 END) as images_cropped,
+                COUNT(CASE WHEN i.is_processed = 1 THEN 1 END) as images_analyzed,
+                COUNT(CASE WHEN pi.corrected_path IS NULL AND i.original_path IS NOT NULL THEN 1 END) as pending_crop,
+                COUNT(CASE WHEN pi.corrected_path IS NOT NULL AND i.is_processed = 0 THEN 1 END) as pending_analysis
+            FROM images i
+            INNER JOIN folders f ON i.folder_id = f.id
+            LEFT JOIN processed_images pi ON i.id = pi.image_id
+            WHERE f.project_id = ?
+        ", [$project->id]);
+
+        return response()->json([
+            'project_id' => $project->id,
+            'stats' => $stats[0] ?? [],
+            'can_retry_crop' => ($stats[0]->pending_crop ?? 0) > 0,
+            'can_retry_analysis' => ($stats[0]->pending_analysis ?? 0) > 0
+        ]);
+    }
+
+    /**
+     * ✅ Reintentar procesamiento de imágenes pendientes (SOLO recorte)
      */
     public function retryPendingImages(Project $project)
     {
-        // ✅ Buscar imágenes sin procesar o con errores a través de la relación folder
+        // ✅ Buscar imágenes sin procesar o con errores de RECORTE (no IA)
         $pendingImages = Image::whereHas('folder', function($q) use ($project) {
             $q->where('project_id', $project->id);
         })
             ->where(function($query) {
-                $query->whereDoesntHave('processedImage')
-                    ->orWhereHas('processedImage', function($q) {
-                        $q->where(function($subQ) {
-                            $subQ->whereNull('corrected_path')
-                                ->orWhere('status', 'error')
-                                ->orWhere('status', 'pending');
-                        });
+                $query->whereDoesntHave('processedImage') // ✅ Sin imagen procesada
+                ->orWhereHas('processedImage', function($q) {
+                    $q->where(function($subQ) {
+                        $subQ->whereNull('corrected_path') // ✅ Sin recorte
+                        ->orWhere('status', 'error') // ✅ Error en recorte
+                        ->orWhere('status', 'pending'); // ✅ Pendiente de recorte
                     });
+                });
             })
             ->with(['folder'])
             ->get();
 
         if ($pendingImages->isEmpty()) {
             return response()->json([
-                'message' => 'No hay imágenes pendientes de procesar',
+                'message' => 'No hay imágenes pendientes de procesamiento/recorte',
                 'retried' => 0
             ]);
         }
 
-        // Crear un nuevo batch para el reintento
+        // ✅ Crear un nuevo batch para el reintento de RECORTE
         $retryBatch = ImageBatch::create([
             'project_id' => $project->id,
             'type' => 'retry-processing',
@@ -233,15 +261,15 @@ class AnalysisBatchController extends Controller
             'errors' => 0
         ]);
 
-        // Despachar jobs para cada imagen pendiente
+        // ✅ Despachar jobs de procesamiento individual (no IA)
         foreach ($pendingImages as $image) {
             dispatch(new ProcessImageImmediatelyJob($image->id, $retryBatch->id));
         }
 
-        Log::info("Reiniciando procesamiento de {$pendingImages->count()} imágenes en batch {$retryBatch->id}");
+        Log::info("Reiniciando procesamiento/recorte de {$pendingImages->count()} imágenes en batch {$retryBatch->id}");
 
         return response()->json([
-            'message' => "Reiniciando procesamiento de {$pendingImages->count()} imágenes",
+            'message' => "Reiniciando procesamiento/recorte de {$pendingImages->count()} imágenes",
             'retried' => $pendingImages->count(),
             'batch_id' => $retryBatch->id
         ]);
@@ -252,30 +280,27 @@ class AnalysisBatchController extends Controller
      */
     public function retryPendingAnalysis(Project $project)
     {
-        // ✅ Buscar imágenes procesadas pero sin análisis a través de la relación folder
+        // ✅ Buscar imágenes que tienen imagen procesada (recortada) pero NO tienen análisis IA
         $pendingImages = Image::whereHas('folder', function($q) use ($project) {
             $q->where('project_id', $project->id);
         })
             ->whereHas('processedImage', function($q) {
-                $q->whereNotNull('corrected_path');
+                $q->whereNotNull('corrected_path'); // ✅ Tienen recorte
             })
-            ->where(function($query) {
-                $query->where('is_processed', false)
-                    ->orWhereDoesntHave('analysisResult');
-            })
+            ->where('is_processed', false) // ✅ NO tienen análisis IA
             ->with(['folder', 'processedImage'])
             ->get();
 
         if ($pendingImages->isEmpty()) {
             return response()->json([
-                'message' => 'No hay imágenes pendientes de análisis',
+                'message' => 'No hay imágenes pendientes de análisis IA',
                 'retried' => 0
             ]);
         }
 
         $imageIds = $pendingImages->pluck('id')->toArray();
 
-        // Crear un nuevo batch para el reintento
+        // ✅ Crear un nuevo batch para el reintento
         $retryBatch = AnalysisBatch::create([
             'project_id' => $project->id,
             'image_ids' => json_encode($imageIds),
@@ -284,15 +309,32 @@ class AnalysisBatchController extends Controller
             'status' => 'processing'
         ]);
 
-        // Despachar job de análisis masivo
-        dispatch(new ProcessBulkImagesJob($imageIds, null, $retryBatch->id));
+        // ✅ Usar la nueva arquitectura de chunks
+        $chunkSize = count($imageIds) <= 50 ? 10 : 25;
+        $chunks = array_chunk($imageIds, $chunkSize);
+        $totalChunks = count($chunks);
 
-        Log::info("Reiniciando análisis de {$pendingImages->count()} imágenes en batch {$retryBatch->id}");
+        foreach ($chunks as $index => $chunk) {
+            $delay = $index * 15; // 15 segundos entre chunks para reintentos
+
+            ProcessBulkImagesJob::dispatch(
+                $chunk,
+                null, // Sin email para reintentos
+                $retryBatch->id,
+                $index + 1,
+                $totalChunks
+            )
+                ->delay(now()->addSeconds($delay))
+                ->onQueue('analysis');
+        }
+
+        Log::info("Reiniciando análisis IA de {$pendingImages->count()} imágenes en batch {$retryBatch->id}");
 
         return response()->json([
-            'message' => "Reiniciando análisis de {$pendingImages->count()} imágenes",
+            'message' => "Reiniciando análisis IA de {$pendingImages->count()} imágenes en {$totalChunks} lotes",
             'retried' => $pendingImages->count(),
-            'batch_id' => $retryBatch->id
+            'batch_id' => $retryBatch->id,
+            'chunks' => $totalChunks
         ]);
     }
 

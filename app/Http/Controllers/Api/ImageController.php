@@ -294,7 +294,7 @@ class ImageController extends Controller
                 'original_path' => $stored,
             ]);
 
-            dispatch(new \App\Jobs\ProcessImageImmediatelyJob($image->id));
+           // dispatch(new \App\Jobs\ProcessImageImmediatelyJob($image->id));
             $matched++;
         }
 
