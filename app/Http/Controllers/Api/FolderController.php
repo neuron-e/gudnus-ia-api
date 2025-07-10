@@ -251,23 +251,97 @@ class FolderController extends Controller
             return response()->json(['error' => 'Número inválido de módulos'], 400);
         }
 
-        $created = [];
-
-        for ($i = 1; $i <= $modules; $i++) {
-            $folder = Folder::create([
-                'project_id' => $project->id,
-                'parent_id' => null, // puedes ajustar si hay una jerarquía
-                'name' => "Módulo {$i}",
-                'type' => 'modulo', // si usas el campo type
-            ]);
-            $created[] = $folder;
+        // ✅ Límite de seguridad para evitar problemas de memoria/tiempo
+        if ($modules > 10000) {
+            return response()->json(['error' => 'Máximo 10,000 módulos por proyecto'], 400);
         }
 
+        Log::info("🏗️ Generando {$modules} módulos para proyecto {$project->id}");
+
+        $created = [];
+        $batchSize = 500; // Procesar en lotes de 500
+
+        try {
+            DB::beginTransaction();
+
+            // ✅ Verificar que no existan módulos previamente
+            $existingCount = Folder::where('project_id', $project->id)->count();
+            if ($existingCount > 0) {
+                DB::rollBack();
+                return response()->json([
+                    'error' => "El proyecto ya tiene {$existingCount} carpetas. No se puede generar estructura básica."
+                ], 400);
+            }
+
+            // ✅ Generar en lotes para mejor performance
+            for ($batch = 0; $batch < ceil($modules / $batchSize); $batch++) {
+                $startIdx = $batch * $batchSize + 1;
+                $endIdx = min(($batch + 1) * $batchSize, $modules);
+
+                $batchData = [];
+
+                for ($i = $startIdx; $i <= $endIdx; $i++) {
+                    $batchData[] = [
+                        'project_id' => $project->id,
+                        'parent_id' => null,
+                        'name' => "Módulo {$i}",
+                        'type' => 'modulo',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ];
+                }
+
+                // ✅ Inserción masiva para mejor performance
+                $insertedIds = Folder::insert($batchData);
+                $batchCount = $batch + 1;
+                Log::info("📁 Lote {$batchCount}: Módulos {$startIdx}-{$endIdx} creados");
+            }
+
+            // ✅ Recuperar todos los módulos creados para respuesta
+            $allCreated = Folder::where('project_id', $project->id)
+                ->where('type', 'modulo')
+                ->orderBy('name')
+                ->get();
+
+            DB::commit();
+
+            Log::info("✅ Estructura básica generada: {$modules} módulos para proyecto {$project->id}");
+
+            return response()->json([
+                'ok' => true,
+                'created_count' => $allCreated->count(),
+                'message' => "Se crearon {$modules} módulos correctamente",
+                'modules' => $allCreated->take(10), // Solo primeros 10 para respuesta
+                'total_modules' => $allCreated->count()
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error("❌ Error generando estructura básica: " . $e->getMessage());
+
+            return response()->json([
+                'error' => 'Error generando módulos: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    public function checkProjectStructure(Project $project)
+    {
+        $folderCount = Folder::where('project_id', $project->id)->count();
+        $leafNodes = Folder::where('project_id', $project->id)
+            ->where('type', 'modulo')
+            ->count();
+
         return response()->json([
-            'ok' => true,
-            'created' => $created
+            'project_id' => $project->id,
+            'has_structure' => $folderCount > 0,
+            'total_folders' => $folderCount,
+            'leaf_modules' => $leafNodes,
+            'can_auto_generate' => $folderCount === 0,
+            'structure_type' => $folderCount === 0 ? 'empty' : ($leafNodes > 0 ? 'with_modules' : 'partial')
         ]);
     }
+
 
     /**
      * Display the specified resource.

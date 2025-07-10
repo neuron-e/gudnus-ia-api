@@ -1,6 +1,9 @@
 <?php
 
 use App\Http\Controllers\Api\AnalysisBatchController;
+use App\Http\Controllers\Api\FolderController;
+use App\Http\Controllers\Api\LargeZipController;
+use App\Http\Controllers\Api\ProjectController;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -34,10 +37,28 @@ Route::middleware('auth:sanctum')->post('/logout', function (Request $request) {
     $request->user()->currentAccessToken()->delete();
     return response()->json(['message' => 'Sesión cerrada']);
 });
+// Cancelar generación
+Route::delete('/reports/{generation}/cancel', [ProjectController::class, 'cancelReportGeneration']);
+
+Route::delete('/reports/{generationId}', [ProjectController::class, 'deleteReport']);
+
 Route::apiResource('projects', \App\Http\Controllers\Api\ProjectController::class)->parameters(['' => 'project']);
+
 Route::prefix('projects')->group(function () {
     Route::post('/{project}/generate-basic-structure', [\App\Http\Controllers\Api\FolderController::class, 'generateBasicStructure']);
-    Route::get('/{project}/generate-report', [\App\Http\Controllers\Api\ProjectController::class, 'generateReport']);
+    Route::get('{project}/check-structure', [FolderController::class, 'checkProjectStructure']);
+/*    Route::get('/{project}/generate-report', [\App\Http\Controllers\Api\ProjectController::class, 'generateReport']);*/
+    Route::post('/{project}/reports/generate', [ProjectController::class, 'generateReport']);
+    // Estado de generación
+    Route::get('/{project}/reports/status/{generation?}', [ProjectController::class, 'getReportStatus']);
+
+    // Listar reportes del proyecto
+    Route::get('/{project}/reports', [ProjectController::class, 'listReports']);
+
+    // ✅ Verificar estado general de reportes del proyecto
+    Route::get('/{project}/reports/check', [ProjectController::class, 'checkProjectReports']);
+
+    Route::get('/health/reports', [\App\Http\Controllers\HealthController::class, 'reports']);
 
     Route::get('/{project}/folders', [\App\Http\Controllers\Api\FolderController::class, 'index']);
     Route::post('/{project}/folders', [\App\Http\Controllers\Api\FolderController::class, 'store']);
@@ -56,10 +77,25 @@ Route::prefix('projects')->group(function () {
     Route::get('/{project}/processing-status', [\App\Http\Controllers\Api\ProjectController::class, 'getProcessingStatus']);
 
 
+    // Upload ZIP grande
+    Route::post('/{project}/upload-large-zip', [LargeZipController::class, 'uploadLargeZip']);
 
+    // Limpiar análisis antiguos (opcional, para mantenimiento)
+    //Route::delete('zip-analysis/cleanup', [LargeZipController::class, 'cleanupOldAnalyses']);
 
 });
 
+// Estado del análisis
+Route::get('zip-analysis/{analysisId}/status', [LargeZipController::class, 'getAnalysisStatus']);
+
+// Procesar ZIP analizado
+Route::post('zip-analysis/{analysisId}/process', [LargeZipController::class, 'processAnalyzedZip']);
+
+Route::get('/reports/{id}/download/{file?}', [ProjectController::class, 'downloadReport'])
+    ->name('reports.download');
+
+// Limpiar reportes expirados (admin)
+Route::post('/reports/cleanup', [ProjectController::class, 'cleanupExpiredReports']);
 
 Route::prefix('folders')->group(function () {
     Route::get('/{folder}/images', [\App\Http\Controllers\Api\ImageController::class, 'index']);

@@ -3,11 +3,13 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Jobs\GenerateReportJob;
 use App\Models\Folder;
 use App\Models\Image;
 use App\Models\ImageBatch;
 use App\Models\ProcessedImage;
 use App\Models\Project;
+use App\Models\ReportGeneration;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -180,150 +182,457 @@ class ProjectController extends Controller
         return response()->json(['message' => 'Proyecto y todo su contenido eliminado']);
     }
 
-    public function generateReport(Project $project)
+
+    public function generateReport(Project $project, Request $request)
     {
-        // Cargar estructura completa del proyecto
-        $rootFolders = Folder::where('project_id', $project->id)
-            ->whereNull('parent_id')
-            ->with('images.processedImage')
-            ->get();
-
-        $project->children = $rootFolders;
-        foreach ($rootFolders as $folder) {
-            $this->loadChildrenRecursive($folder);
-        }
-
-        // Recoger todas las imágenes procesadas
-        $allImages = collect();
-        $this->collectImagesRecursive($project->children, $allImages);
-
-        // CRÍTICO: Solo imágenes que realmente tienen ProcessedImage
-        $imagesWithProcessed = $allImages->filter(function ($img) {
-            return $img->processedImage !== null;
-        });
-
-        // Generar imágenes analizadas para TODAS las imágenes (con y sin errores)
-        $analyzedPaths = $imagesWithProcessed->map(function ($img, $index) {
-            return $this->generateAnalyzedImageBase64($img->processedImage);
-        })->filter();
-
-        // Configurar DomPDF con opciones optimizadas
-        $pdf = Pdf::loadView('pdf.project_report_calude', [
-            'project' => $project,
-            'images' => $imagesWithProcessed, // Usar todas las imágenes procesadas
-            'analyzedPaths' => $analyzedPaths->values(),
+        $request->validate([
+            'user_email' => 'nullable|email',
+            'max_images_per_page' => 'nullable|integer|min:10|max:100',
+            'include_analyzed_images' => 'nullable|boolean',
+            'force_new' => 'nullable|boolean', // ✅ Nueva opción
         ]);
 
-        // Configuraciones para mejor compatibilidad con DomPDF
-        $pdf->setPaper('a4', 'portrait')
-            ->setOptions([
-                'isHtml5ParserEnabled' => true,
-                'isPhpEnabled' => true,
-                'isRemoteEnabled' => true,
-                'defaultFont' => 'Arial',
-                'dpi' => 96,
-                'defaultPaperSize' => 'a4',
-                'fontHeightRatio' => 1.0,
-                'isJavascriptEnabled' => false,
-                'debugKeepTemp' => false,
-                'debugCss' => false,
-                'debugLayout' => false,
-                'debugLayoutLines' => false,
-                'debugLayoutBlocks' => false,
-                'debugLayoutInline' => false,
-                'debugLayoutPaddingBox' => false,
-            ]);
+        // ✅ Verificar si ya hay una generación en proceso para este proyecto
+        $existingGeneration = ReportGeneration::where('project_id', $project->id)
+            ->where('status', 'processing')
+            ->latest()
+            ->first();
 
-        return $pdf->download("informe-electroluminiscencia-{$project->name}-" . now()->format('Y-m-d') . ".pdf");
-    }
+        if ($existingGeneration) {
+            return response()->json([
+                'message' => 'Ya hay una generación de reporte en proceso para este proyecto',
+                'generation_id' => $existingGeneration->id,
+                'progress' => $existingGeneration->getProgressPercentage(),
+            ], 409);
+        }
 
-    private function collectImagesRecursive($folders, &$allImages)
-    {
-        foreach ($folders as $folder) {
-            if ($folder->images) {
-                foreach ($folder->images as $img) {
-                    $allImages->push($img);
-                }
-            }
-            if ($folder->children) {
-                $this->collectImagesRecursive($folder->children, $allImages);
+        // ✅ Verificar si hay un reporte disponible y no se fuerza uno nuevo
+        if (!$request->input('force_new', false)) {
+            $latestCompleted = ReportGeneration::where('project_id', $project->id)
+                ->where('status', 'completed')
+                ->latest('completed_at')
+                ->first();
+
+            if ($latestCompleted && !$latestCompleted->hasExpired()) {
+                return response()->json([
+                    'message' => 'Ya existe un reporte disponible para este proyecto',
+                    'status' => 'already_exists',
+                    'existing_report' => [
+                        'id' => $latestCompleted->id,
+                        'created_at' => $latestCompleted->created_at,
+                        'expires_at' => $latestCompleted->expires_at,
+                        'download_url' => route('reports.download', ['id' => $latestCompleted->id]),
+                    ],
+                    'suggestion' => 'Use force_new=true para generar un nuevo reporte',
+                ], 200);
             }
         }
+
+        // ✅ Contar imágenes procesadas para estimar tiempo
+        $imageCount = $this->countProcessedImages($project);
+
+        if ($imageCount === 0) {
+            return response()->json([
+                'error' => 'No hay imágenes procesadas para generar el reporte',
+            ], 400);
+        }
+
+        Log::info("🚀 Iniciando generación asíncrona de reporte para proyecto {$project->id} con {$imageCount} imágenes");
+
+        // ✅ Crear registro de seguimiento
+        $reportGeneration = ReportGeneration::create([
+            'project_id' => $project->id,
+            'status' => 'processing',
+            'user_email' => $request->input('user_email'),
+            'total_images' => $imageCount,
+        ]);
+
+        // ✅ Establecer expiración automática
+        $reportGeneration->setExpiration(7); // 7 días
+
+        // ✅ Despachar job asíncrono
+        $job = new GenerateReportJob(
+            projectId: $project->id,
+            userEmail: $request->input('userEmail'),
+            maxImagesPerPage: $request->input('maxImagesPerPage', 500),
+            includeAnalyzedImages: $request->input('includeAnalyzedImages', true)
+        );
+
+        dispatch($job)->onQueue('reports'); // ✅ Cola específica para reportes
+
+        return response()->json([
+            'message' => 'Generación de reporte iniciada. Recibirás una notificación cuando esté listo.',
+            'generation_id' => $reportGeneration->id,
+            'estimated_time' => $this->estimateGenerationTime($imageCount),
+            'total_images' => $imageCount,
+        ]);
     }
 
-    private function generateAnalyzedImageBase64(ProcessedImage $processed): ?string
+    /**
+     * ✅ NUEVO: Obtener estado de generación de reporte
+     */
+    public function getReportStatus(Project $project, $generationId = null)
     {
-        $wasabi = Storage::disk('wasabi');
-        if (!$wasabi->exists($processed->corrected_path)) return null;
+        $query = ReportGeneration::where('project_id', $project->id);
 
-        $imageData = $wasabi->get($processed->corrected_path);
-        $manager = new ImageManager(new ImagickDriver());
-        $image = $manager->read($imageData);
+        if ($generationId) {
+            $generation = $query->findOrFail($generationId);
+        } else {
+            $generation = $query->latest()->first();
+        }
 
-        // CRÍTICO: Usar exactamente la misma lógica de filtrado que en el template
-        $json = $processed->error_edits_json ?: $processed->ai_response_json;
-        $prob = $processed->min_probability ?? 0.5;
-        $response = json_decode($json, true);
+        if (!$generation) {
+            return response()->json([
+                'status' => 'not_found',
+                'message' => 'No se encontró ninguna generación de reporte para este proyecto',
+            ]);
+        }
 
-        if (!isset($response['predictions'])) return null;
-
-        // Aplicar exactamente el mismo filtro que en el Blade template
-        $filteredPredictions = array_filter($response['predictions'], function($prediction) use ($prob) {
-            return !isset($prediction['probability']) || $prediction['probability'] >= $prob;
-        });
-
-        // Colores mejorados para mejor visibilidad en PDF
-        $errorColors = [
-            'Intensidad' => '#FFA500',      // Naranja
-            'Fingers' => '#00BFFF',         // Azul cielo
-            'Black Edges' => '#FF0000',     // Rojo
-            'Microgrietas' => '#8A2BE2',    // Violeta
-            'Defectos' => '#32CD32',        // Verde lima
-            'Soldadura' => '#FF69B4',       // Rosa
-            'Celdas dañadas' => '#FF0000',  // Rojo para celdas dañadas
+        $response = [
+            'generation_id' => $generation->id,
+            'status' => $generation->status,
+            'progress' => $generation->getProgressPercentage(),
+            'processed_images' => $generation->processed_images,
+            'total_images' => $generation->total_images,
+            'created_at' => $generation->created_at,
+            'completed_at' => $generation->completed_at,
+            'expires_at' => $generation->expires_at,
         ];
 
-        // Solo dibujar las predicciones filtradas
-        foreach ($filteredPredictions as $prediction) {
-            $box = $prediction['boundingBox'];
-            $left = (int) ($box['left'] * $image->width());
-            $top = (int) ($box['top'] * $image->height());
-            $width = (int) ($box['width'] * $image->width());
-            $height = (int) ($box['height'] * $image->height());
+        if ($generation->status === 'completed') {
+            $response['download_urls'] = $generation->getDownloadUrls();
+            $response['is_expired'] = $generation->hasExpired();
+        }
 
-            $tag = $prediction['tagName'] ?? '';
-            $color = $errorColors[$tag] ?? '#FFFFFF';
-            $label = sprintf('%s (%.1f%%)', $tag, ($prediction['probability'] ?? 0) * 100);
+        if ($generation->status === 'failed') {
+            $response['error_message'] = $generation->error_message;
+        }
 
-            // Rectángulo con grosor mejorado para PDF
-            $rectangle = new Rectangle($width, $height);
-            $rectangle->setBackgroundColor('rgba(0,0,0,0.1)'); // Fondo semi-transparente mejorado
-            $rectangle->setBorder($color, 3); // Grosor aumentado para mejor visibilidad
-            $image->drawRectangle($left, $top, $rectangle);
+        return response()->json($response);
+    }
 
-            // Texto con fondo para mejor legibilidad
-            try {
-                $font = new Font(resource_path('fonts/Inter_24pt-Regular.ttf'));
-                $font->setColor('#FFFFFF');
-                $font->setSize(16); // Tamaño aumentado
+    /**
+     * ✅ NUEVO: Descargar reporte generado
+     */
+    public function downloadReport($generationId, $fileName = null)
+    {
+        $generation = ReportGeneration::findOrFail($generationId);
 
-                // Agregar fondo semi-transparente al texto
-                $textBg = new Rectangle(strlen($label) * 8, 20);
-                $textBg->setBackgroundColor($color);
-                $image->drawRectangle($left, max(0, $top - 25), $textBg);
+        if (!$generation->isReady()) {
+            return response()->json([
+                'error' => 'El reporte no está listo para descarga',
+                'status' => $generation->status,
+            ], 400);
+        }
 
-                $image->text($label, $left + 2, max(10, $top - 8), $font);
-            } catch (\Exception $e) {
-                // Fallback si no encuentra la fuente
-                $image->text($label, $left + 2, max(10, $top - 8), function($font) {
-                    $font->color('#FFFFFF');
-                    $font->size(14);
-                });
+        if ($generation->hasExpired()) {
+            return response()->json([
+                'error' => 'El reporte ha expirado. Genera uno nuevo.',
+            ], 410);
+        }
+
+        // ✅ Determinar qué archivo descargar
+        $filePaths = is_array($generation->file_path) ? $generation->file_path : [$generation->file_path];
+
+        if ($fileName) {
+            // Buscar archivo específico
+            $targetPath = collect($filePaths)->first(function ($path) use ($fileName) {
+                return basename($path) === $fileName;
+            });
+
+            if (!$targetPath) {
+                return response()->json(['error' => 'Archivo no encontrado'], 404);
+            }
+
+            $filePaths = [$targetPath];
+        }
+
+        // ✅ Si es un solo archivo, descarga directa
+        if (count($filePaths) === 1) {
+
+            $filePath = $filePaths[0];
+
+            if (!Storage::disk('local')->exists($filePath)) {
+                return response()->json(['error' => 'Archivo no encontrado en el sistema'], 404);
+            }
+
+            return Storage::disk('local')->download($filePath);
+        }
+
+        // ✅ Si son múltiples archivos, crear ZIP
+        return $this->downloadMultipleFiles($filePaths, $generation);
+    }
+
+    /**
+     * ✅ NUEVO: Listar reportes de un proyecto
+     */
+    /**
+     * ✅ MEJORADO: Listar todos los reportes disponibles de un proyecto
+     */
+    public function listReports(Project $project)
+    {
+        $reports = ReportGeneration::where('project_id', $project->id)
+            ->orderBy('created_at', 'desc')
+            ->get()
+            ->map(function ($generation) {
+                $data = [
+                    'id' => $generation->id,
+                    'status' => $generation->status,
+                    'progress' => $generation->getProgressPercentage(),
+                    'total_images' => $generation->total_images,
+                    'processed_images' => $generation->processed_images,
+                    'created_at' => $generation->created_at,
+                    'completed_at' => $generation->completed_at,
+                    'expires_at' => $generation->expires_at,
+                    'is_expired' => $generation->hasExpired(),
+                    'user_email' => $generation->user_email,
+                ];
+
+                if ($generation->isReady() && !$generation->hasExpired()) {
+                    $filePaths = is_array($generation->file_path) ? $generation->file_path : [$generation->file_path];
+
+                    // ✅ Verificar que los archivos realmente existen
+                    $existingFiles = [];
+                    $totalSize = 0;
+
+                    foreach ($filePaths as $path) {
+                        if (\Storage::disk('local')->exists($path)) {
+                            $size = \Storage::disk('local')->size($path);
+                            $existingFiles[] = [
+                                'path' => $path,
+                                'name' => basename($path),
+                                'size' => $size,
+                                'size_mb' => round($size / 1024 / 1024, 2),
+                                'download_url' => route('reports.download', [
+                                    'id' => $generation->id,
+                                    'file' => basename($path)
+                                ])
+                            ];
+                            $totalSize += $size;
+                        }
+                    }
+
+                    $data['files'] = $existingFiles;
+                    $data['total_size_mb'] = round($totalSize / 1024 / 1024, 2);
+                    $data['file_count'] = count($existingFiles);
+                    $data['can_download'] = count($existingFiles) > 0;
+                    $data['download_urls'] = array_column($existingFiles, 'download_url');
+
+                    // ✅ URL principal de descarga
+                    if (count($existingFiles) > 0) {
+                        $data['primary_download_url'] = $existingFiles[0]['download_url'];
+                    }
+                } else {
+                    $data['files'] = [];
+                    $data['can_download'] = false;
+                    $data['download_urls'] = [];
+                }
+
+                return $data;
+            });
+
+        return response()->json([
+            'reports' => $reports,
+            'total_reports' => $reports->count(),
+            'available_reports' => $reports->where('can_download', true)->count(),
+            'processing_reports' => $reports->where('status', 'processing')->count(),
+        ]);
+    }
+
+    /**
+     * ✅ NUEVO: Cancelar generación en proceso
+     */
+    public function cancelReportGeneration($generationId)
+    {
+        $generation = ReportGeneration::findOrFail($generationId);
+
+        if ($generation->status !== 'processing') {
+            return response()->json([
+                'error' => 'Solo se pueden cancelar generaciones en proceso',
+            ], 400);
+        }
+
+        $generation->update([
+            'status' => 'failed',
+            'error_message' => 'Cancelado por el usuario',
+        ]);
+
+        return response()->json([
+            'message' => 'Generación cancelada correctamente',
+        ]);
+    }
+
+    /**
+     * ✅ NUEVO: Limpiar reportes expirados
+     */
+    public function cleanupExpiredReports()
+    {
+        $expiredReports = ReportGeneration::where('expires_at', '<', now())
+            ->where('status', 'completed')
+            ->get();
+
+        $cleaned = 0;
+        foreach ($expiredReports as $report) {
+            $report->deleteFiles();
+            $report->delete();
+            $cleaned++;
+        }
+
+        return response()->json([
+            'message' => "Se limpiaron {$cleaned} reportes expirados",
+            'cleaned_count' => $cleaned,
+        ]);
+    }
+
+    // ✅ Métodos auxiliares privados
+
+    private function countProcessedImages(Project $project): int
+    {
+        return \App\Models\Image::whereHas('folder', function($q) use ($project) {
+            $q->where('project_id', $project->id);
+        })
+            ->whereHas('processedImage', function($q) {
+                $q->whereNotNull('corrected_path');
+            })
+            ->count();
+    }
+
+    private function estimateGenerationTime(int $imageCount): string
+    {
+        // ✅ Estimación conservadora: 1-2 segundos por imagen
+        $estimatedSeconds = $imageCount * 1.5;
+
+        if ($estimatedSeconds < 60) {
+            return 'Menos de 1 minuto';
+        } elseif ($estimatedSeconds < 300) {
+            return 'Entre 1-5 minutos';
+        } elseif ($estimatedSeconds < 900) {
+            return 'Entre 5-15 minutos';
+        } elseif ($estimatedSeconds < 1800) {
+            return 'Entre 15-30 minutos';
+        } else {
+            return 'Más de 30 minutos';
+        }
+    }
+
+    private function downloadMultipleFiles(array $filePaths, ReportGeneration $generation)
+    {
+        $zipName = "informe-completo-{$generation->project->name}-" . now()->format('Y-m-d') . ".zip";
+        $zipPath = storage_path("app/temp/{$zipName}");
+
+        $zip = new \ZipArchive();
+        if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+            return response()->json(['error' => 'No se pudo crear el archivo ZIP'], 500);
+        }
+
+        foreach ($filePaths as $filePath) {
+            if (Storage::disk('local')->exists($filePath)) {
+                $zip->addFile(
+                    Storage::disk('local')->path($filePath),
+                    basename($filePath)
+                );
             }
         }
 
-        $encoded = (string) $image->toJpeg(85); // Calidad mejorada para PDF
-        return 'data:image/jpeg;base64,' . base64_encode($encoded);
+        $zip->close();
+
+        return response()->download($zipPath)->deleteFileAfterSend(true);
+    }
+
+    /**
+     * ✅ NUEVO: Verificar estado de reportes del proyecto
+     */
+    public function checkProjectReports(Project $project)
+    {
+        // Buscar el último reporte completado
+        $latestCompleted = ReportGeneration::where('project_id', $project->id)
+            ->where('status', 'completed')
+            ->latest('completed_at')
+            ->first();
+
+        // Buscar si hay alguno procesando
+        $currentProcessing = ReportGeneration::where('project_id', $project->id)
+            ->where('status', 'processing')
+            ->latest()
+            ->first();
+
+        $response = [
+            'project_id' => $project->id,
+            'has_available_report' => false,
+            'is_generating' => false,
+            'latest_report' => null,
+            'current_generation' => null,
+        ];
+
+        if ($latestCompleted && !$latestCompleted->hasExpired()) {
+            $response['has_available_report'] = true;
+            $response['latest_report'] = [
+                'id' => $latestCompleted->id,
+                'created_at' => $latestCompleted->created_at,
+                'completed_at' => $latestCompleted->completed_at,
+                'expires_at' => $latestCompleted->expires_at,
+                'total_images' => $latestCompleted->total_images,
+                'size_info' => $this->getReportSizeInfo($latestCompleted),
+                'download_url' => route('reports.download', ['generation' => $latestCompleted->id]),
+            ];
+        }
+
+        if ($currentProcessing) {
+            $response['is_generating'] = true;
+            $response['current_generation'] = [
+                'id' => $currentProcessing->id,
+                'progress' => $currentProcessing->getProgressPercentage(),
+                'processed_images' => $currentProcessing->processed_images,
+                'total_images' => $currentProcessing->total_images,
+                'started_at' => $currentProcessing->created_at,
+            ];
+        }
+
+        return response()->json($response);
+    }
+
+    /**
+     * ✅ NUEVO: Eliminar reporte específico
+     */
+    public function deleteReport($generationId)
+    {
+        $generation = ReportGeneration::findOrFail($generationId);
+
+        // Verificar permisos si es necesario
+        // if (!auth()->user()->can('delete', $generation)) { ... }
+
+        $generation->deleteFiles();
+        $generation->delete();
+
+        return response()->json([
+            'message' => 'Reporte eliminado correctamente',
+            'deleted_generation_id' => $generationId,
+        ]);
+    }
+
+    /**
+     * ✅ HELPER: Obtener información de tamaño del reporte
+     */
+    private function getReportSizeInfo(ReportGeneration $generation)
+    {
+        if (!$generation->file_path) return null;
+
+        $filePaths = is_array($generation->file_path) ? $generation->file_path : [$generation->file_path];
+        $totalSize = 0;
+        $fileCount = 0;
+
+        foreach ($filePaths as $path) {
+            if (\Storage::disk('local')->exists($path)) {
+                $totalSize += \Storage::disk('local')->size($path);
+                $fileCount++;
+            }
+        }
+
+        return [
+            'total_size_bytes' => $totalSize,
+            'total_size_mb' => round($totalSize / 1024 / 1024, 2),
+            'file_count' => $fileCount,
+        ];
     }
 
     private function getBase64FromWasabi(string $path): ?string
