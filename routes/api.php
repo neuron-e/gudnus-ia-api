@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\AnalysisBatchController;
+use App\Http\Controllers\Api\DownloadController;
 use App\Http\Controllers\Api\FolderController;
 use App\Http\Controllers\Api\LargeZipController;
 use App\Http\Controllers\Api\ProjectController;
@@ -80,10 +81,18 @@ Route::prefix('projects')->group(function () {
     // Upload ZIP grande
     Route::post('/{project}/upload-large-zip', [LargeZipController::class, 'uploadLargeZip']);
 
+    // ✅ Rutas de descarga masiva
+    Route::post('/{project}/downloads/start', [DownloadController::class, 'startMassiveDownload']);
+    Route::get('/{project}/downloads', [DownloadController::class, 'listProjectDownloads']);
+
     // Limpiar análisis antiguos (opcional, para mantenimiento)
     //Route::delete('zip-analysis/cleanup', [LargeZipController::class, 'cleanupOldAnalyses']);
 
 });
+
+Route::get('/downloads/{batchId}/{filename}', [DownloadController::class, 'downloadFile'])
+    ->where('filename', '.*') // para que funcione con rutas anidadas
+    ->name('downloads.file');
 
 // Estado del análisis
 Route::get('zip-analysis/{analysisId}/status', [LargeZipController::class, 'getAnalysisStatus']);
@@ -101,6 +110,9 @@ Route::prefix('folders')->group(function () {
     Route::get('/{folder}/images', [\App\Http\Controllers\Api\ImageController::class, 'index']);
     Route::post('/{folder}/images/upload', [\App\Http\Controllers\Api\ImageController::class, 'upload']);
 });
+
+Route::get('/downloads/{batchId}/status', [\App\Http\Controllers\Api\DownloadController::class, 'getDownloadStatus']);
+
 
 Route::get('/images/{image}/processed', [\App\Http\Controllers\Api\ProcessedImageController::class, 'show']);
 Route::get('/images/{image}/analysis', [\App\Http\Controllers\Api\ImageAnalysisResultController::class, 'show']);

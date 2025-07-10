@@ -15,57 +15,71 @@ class AnalyzeLargeZipJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $timeout = 3600;
+    public $timeout = 3600; // 1 hora
     public $tries = 2;
 
     public function __construct(public string $analysisId) {}
 
     public function handle()
     {
-        $analysis = ZipAnalysis::findOrFail($this->analysisId);
+        $analysis = ZipAnalysis::find($this->analysisId);
+        if (!$analysis) {
+            Log::error("❌ Análisis {$this->analysisId} no encontrado");
+            return;
+        }
 
         try {
-            // ✅ FIX: Asegurar que los campos sean strings
-            $filename = is_array($analysis->original_filename)
-                ? json_encode($analysis->original_filename)
-                : (string)$analysis->original_filename;
+            Log::info("🔍 Iniciando análisis de ZIP", ['analysis_id' => $this->analysisId]);
 
-            Log::info("🔍 Iniciando análisis de ZIP grande: {$filename}");
+            // ✅ Actualizar estado
+            $analysis->update(['status' => 'processing', 'progress' => 10]);
 
-            $analysis->update(['status' => 'processing', 'progress' => 5]);
-
-            $zipPath = Storage::disk('local')->path($analysis->file_path);
-
+            // ✅ Verificar que el ZIP existe
+            $zipPath = storage_path("app/{$analysis->file_path}");
             if (!file_exists($zipPath)) {
                 throw new \Exception("Archivo ZIP no encontrado: {$zipPath}");
             }
 
-            // ✅ Usar PHP ZipArchive en lugar de comando unzip (compatible Windows)
-            $result = $this->analyzeZipWithPHP($zipPath, $analysis);
-
-            if (!is_array($result) || !isset($result['valid_images']) || !isset($result['all_files'])) {
-                throw new \Exception("Resultado de análisis inválido");
+            // ✅ Crear directorio de extracción
+            $extractPath = $analysis->getExtractedPath();
+            if (!file_exists($extractPath)) {
+                mkdir($extractPath, 0755, true);
             }
 
-            $validImages = $result['valid_images'];
-            $allFiles = $result['all_files'];
+            $analysis->update(['progress' => 30]);
 
-            if (!is_array($validImages)) $validImages = [];
-            if (!is_array($allFiles)) $allFiles = [];
+            // ✅ Extraer ZIP
+            $zip = new \ZipArchive;
+            if ($zip->open($zipPath) !== true) {
+                throw new \Exception('No se pudo abrir el archivo ZIP');
+            }
+
+            if (!$zip->extractTo($extractPath)) {
+                $zip->close();
+                throw new \Exception('No se pudo extraer el archivo ZIP');
+            }
+
+            $zip->close();
+            $analysis->update(['progress' => 60]);
+
+            // ✅ Analizar imágenes
+            $imageData = $this->analyzeImages($extractPath);
 
             $analysis->update([
                 'status' => 'completed',
                 'progress' => 100,
-                'total_files' => count($allFiles),
-                'valid_images' => count($validImages),
-                'images_data' => json_encode($validImages, JSON_UNESCAPED_SLASHES),
+                'total_files' => $imageData['total_files'],
+                'valid_images' => $imageData['valid_images'], // ✅ Usar nombre correcto
+                'images_data' => $imageData['images'] // ✅ Usar nombre correcto
             ]);
 
-            Log::info("✅ Análisis completado: " . count($validImages) . " imágenes válidas encontradas");
+            Log::info("✅ Análisis completado", [
+                'analysis_id' => $this->analysisId,
+                'valid_images' => $imageData['valid_images']
+            ]);
 
-        } catch (\Throwable $e) {
-            Log::error("❌ Error analizando ZIP: " . $e->getMessage());
-            Log::error("❌ Stack trace: " . $e->getTraceAsString());
+        } catch (\Exception $e) {
+            Log::error("❌ Error en análisis {$this->analysisId}: " . $e->getMessage());
 
             $analysis->update([
                 'status' => 'failed',
@@ -74,130 +88,54 @@ class AnalyzeLargeZipJob implements ShouldQueue
         }
     }
 
-    /**
-     * ✅ NUEVO: Análisis usando PHP ZipArchive (compatible Windows/Linux)
-     */
-    private function analyzeZipWithPHP(string $zipPath, ZipAnalysis $analysis): array
+    private function analyzeImages(string $extractPath): array
     {
-        Log::info("🔍 Analizando ZIP con PHP ZipArchive: {$zipPath}");
+        $images = [];
+        $totalFiles = 0;
+        $validImages = 0;
 
-        $zip = new \ZipArchive();
-        $result = $zip->open($zipPath);
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($extractPath),
+            \RecursiveIteratorIterator::LEAVES_ONLY
+        );
 
-        if ($result !== TRUE) {
-            throw new \Exception("No se pudo abrir el ZIP. Código de error: {$result}");
-        }
+        foreach ($iterator as $file) {
+            if ($file->isFile()) {
+                $totalFiles++;
 
-        try {
-            $allFiles = [];
-            $validImages = [];
-            $totalEntries = $zip->numFiles;
+                $filename = $file->getFilename();
+                $extension = strtolower($file->getExtension());
 
-            Log::info("📊 Procesando {$totalEntries} entradas del ZIP");
+                // ✅ Filtros de archivos válidos
+                if (in_array($extension, ['jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp']) &&
+                    !str_starts_with($filename, '.') &&
+                    !str_contains(strtolower($file->getPath()), '__macosx') &&
+                    $filename !== '.ds_store') {
 
-            for ($i = 0; $i < $totalEntries; $i++) {
-                $entry = $zip->statIndex($i);
+                    $relativePath = str_replace($extractPath . DIRECTORY_SEPARATOR, '', $file->getPathname());
+                    $relativePath = str_replace('\\', '/', $relativePath); // Normalizar separadores
 
-                if ($entry === false) {
-                    Log::warning("⚠️ No se pudo leer entrada {$i}");
-                    continue;
-                }
-
-                $fileName = $entry['name'];
-                $fileSize = $entry['size'];
-
-                // Saltar directorios
-                if (substr($fileName, -1) === '/') continue;
-
-                $allFiles[] = [
-                    'path' => $fileName,
-                    'size' => $fileSize
-                ];
-
-                // ✅ Verificar si es imagen válida
-                if ($this->isValidImageFile($fileName, $fileSize)) {
-                    $validImages[] = [
-                        'path' => $fileName,
-                        'name' => basename($fileName),
-                        'size' => $fileSize,
-                        'folder' => dirname($fileName) !== '.' ? dirname($fileName) : ''
+                    $images[] = [
+                        'name' => $filename,
+                        'path' => $relativePath,
+                        'size' => $file->getSize()
                     ];
-                }
 
-                // ✅ Actualizar progreso cada 1000 archivos
-                if ($i % 1000 === 0) {
-                    $progress = 20 + (($i / $totalEntries) * 60); // 20% - 80%
-                    $analysis->update(['progress' => (int)$progress]);
-                    Log::info("📈 Progreso análisis: {$progress}% ({$i}/{$totalEntries})");
+                    $validImages++;
                 }
             }
-
-            $analysis->update(['progress' => 80]);
-
-            // ✅ Ordenar imágenes por nombre numérico
-            usort($validImages, function($a, $b) {
-                $aNum = $this->extractNumber($a['name']);
-                $bNum = $this->extractNumber($b['name']);
-                return $aNum <=> $bNum;
-            });
-
-            Log::info("📊 Análisis completado: " . count($allFiles) . " archivos, " . count($validImages) . " imágenes válidas");
-
-            return [
-                'all_files' => $allFiles,
-                'valid_images' => $validImages
-            ];
-
-        } finally {
-            $zip->close();
-        }
-    }
-
-    /**
-     * ✅ Verificar si es archivo de imagen válido
-     */
-    private function isValidImageFile(string $filePath, int $size): bool
-    {
-        // Verificar extensión
-        $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
-        if (!in_array($ext, ['jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp'])) {
-            return false;
         }
 
-        // Verificar tamaño mínimo (evitar thumbnails)
-        if ($size < 10000) { // 10KB mínimo
-            return false;
-        }
-
-        // Filtrar archivos del sistema
-        $fileName = strtolower(basename($filePath));
-        $excludePatterns = [
-            '__macosx', '.ds_store', 'thumbs.db', '.tmp', '.temp'
+        return [
+            'total_files' => $totalFiles,
+            'valid_images' => $validImages,
+            'images' => $images
         ];
-
-        foreach ($excludePatterns as $pattern) {
-            if (strpos($fileName, $pattern) !== false || strpos($filePath, $pattern) !== false) {
-                return false;
-            }
-        }
-
-        return true;
     }
 
-    /**
-     * ✅ Extraer número de un nombre de archivo para ordenamiento
-     */
-    private function extractNumber(string $filename): int
+    public function failed(\Exception $exception): void
     {
-        if (preg_match('/(\d+)/', $filename, $matches)) {
-            return (int)$matches[1];
-        }
-        return 0;
-    }
-
-    public function failed(\Throwable $exception): void
-    {
-        Log::error("❌ AnalyzeLargeZipJob failed: " . $exception->getMessage());
+        Log::error("❌ AnalyzeLargeZipJob FAILED para análisis {$this->analysisId}: " . $exception->getMessage());
 
         $analysis = ZipAnalysis::find($this->analysisId);
         if ($analysis) {

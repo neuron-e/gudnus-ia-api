@@ -88,7 +88,8 @@ return [
         'redis:images' => 60,
         'redis:analysis' => 120,     // ✅ Más tiempo para análisis IA
         'redis:zip-analysis' => 300, // ✅ NUEVA: Análisis de ZIP grandes
-        'redis:reports' => 600,      // ✅ NUEVA: Generación de reportes
+        'redis:downloads' => 600,    // ✅ 10 minutos para descargas
+        'redis:reports' => 1200,     // ✅ 20 minutos para reportes
     ],
 
     /*
@@ -263,18 +264,35 @@ return [
                 'rest' => 60,
             ],
 
+            'supervisor-downloads' => [
+                'connection' => 'redis',
+                'queue' => ['downloads'],
+                'balance' => 'auto',
+                'autoScalingStrategy' => 'size',
+                'minProcesses' => 1,
+                'maxProcesses' => 3, // Máximo 3 descargas simultáneas
+                'tries' => 2,
+                'timeout' => 7200, // 2 horas timeout
+                'memory' => 512, // Más memoria para ZIPs grandes
+                'sleep' => 5,
+                'maxJobs' => 10,
+                'rest' => 300, // 5 minutos de descanso cada 10 jobs
+            ],
+
             // ✅ NUEVA: Cola para generación de reportes
             'supervisor-reports' => [
                 'connection' => 'redis',
                 'queue' => ['reports'],
-                'balance' => 'simple',
-                'processes' => 2,     // Máximo 2 reportes simultáneos
-                'tries' => 2,
-                'timeout' => 3600,    // 1 hora para reportes grandes
-                'memory' => 1024,     // Mucha memoria para PDFs con miles de imágenes
+                'balance' => 'auto',
+                'autoScalingStrategy' => 'time',
+                'minProcesses' => 1,
+                'maxProcesses' => 2,
+                'tries' => 1,
+                'timeout' => 3600, // 1 hora
+                'memory' => 1024, // 1GB para PDFs grandes
                 'sleep' => 10,
-                'maxJobs' => 5,       // Restart muy frecuente
-                'rest' => 120,        // 2 minutos de descanso
+                'maxJobs' => 5,
+                'rest' => 600, // 10 minutos de descanso
             ],
 
             // ✅ Cola para tareas muy pesadas (batch completos)
