@@ -282,7 +282,7 @@ class ImageProcessingService
 
             Log::info("✅ Imagen {$image->id} procesada correctamente");
 
-            // ✅ CORREGIDO: Descomentar incremento de batch procesado
+/*            // ✅ CORREGIDO: Descomentar incremento de batch procesado
             if ($batchId) {
                 $batch = \App\Models\ImageBatch::find($batchId);
                 if ($batch) {
@@ -291,7 +291,7 @@ class ImageProcessingService
                     $batch->touch();
                     Log::debug("📊 Batch {$batch->id}: processed {$oldProcessed} → {$batch->processed}");
                 }
-            }
+            }*/
 
             return $image;
 

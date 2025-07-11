@@ -88,8 +88,16 @@ class ProcessedImageController extends Controller
             $analysis->fill($counts);
             $image->analysisResult()->save($analysis);
 
-            $image->processedImage->ai_response_json = json_encode($json);
-            $image->processedImage->save();
+            $processed = $image->processedImage;
+
+            if (!$processed) {
+                $processed = new \App\Models\ProcessedImage();
+                $processed->image_id = $image->id;
+            }
+
+            $processed->ai_response_json = json_encode($json);
+            $processed->processed = true; // si tienes este campo
+            $processed->save();
 
             $image->update(['is_processed' => true]);
 
@@ -171,7 +179,7 @@ class ProcessedImageController extends Controller
                 $index + 1, // chunkIndex (1-based)
                 $totalChunks
             )
-                ->delay(now()->addSeconds($delay))
+                /*->delay(now()->addSeconds($delay))*/
                 ->onQueue('analysis');
         }
 
