@@ -1,5 +1,5 @@
 <?php
-// Versión mejorada del ImageProcessingService con logging detallado
+// Versión CORREGIDA del ImageProcessingService con logging detallado
 
 namespace App\Services;
 
@@ -20,7 +20,8 @@ class ImageProcessingService
         $batch = \App\Models\ImageBatch::find($batchId);
         if (!$batch) return;
 
-        //$batch->increment('errors');
+        // ✅ CORREGIDO: Descomentar incremento de errores
+        $batch->increment('errors');
         $batch->update([
             'error_messages' => array_merge($batch->error_messages ?? [], [$msg]),
         ]);
@@ -281,8 +282,8 @@ class ImageProcessingService
 
             Log::info("✅ Imagen {$image->id} procesada correctamente");
 
-            // ✅ Incrementar batch
-/*            if ($batchId) {
+            // ✅ CORREGIDO: Descomentar incremento de batch procesado
+            if ($batchId) {
                 $batch = \App\Models\ImageBatch::find($batchId);
                 if ($batch) {
                     $oldProcessed = $batch->processed;
@@ -290,7 +291,7 @@ class ImageProcessingService
                     $batch->touch();
                     Log::debug("📊 Batch {$batch->id}: processed {$oldProcessed} → {$batch->processed}");
                 }
-            }*/
+            }
 
             return $image;
 

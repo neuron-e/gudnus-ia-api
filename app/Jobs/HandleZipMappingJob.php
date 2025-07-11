@@ -3,8 +3,6 @@
 namespace App\Jobs;
 
 use App\Models\ImageBatch;
-use App\Models\Project;
-use App\Models\Folder;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -18,15 +16,15 @@ class HandleZipMappingJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $timeout = 3600; // 1 hora
+    public $timeout = 3600;
     public $tries = 2;
 
     public function __construct(
         public int $projectId,
         public array $mapping,
-        public ?string $zipPath = null, // ✅ Ahora opcional
+        public ?string $zipPath,
         public int $batchId,
-        public ?string $extractedPath = null // ✅ NUEVO: ruta de archivos ya extraídos
+        public ?string $extractedPath = null // ✅ NUEVO: Permitir usar archivos ya extraídos
     ) {}
 
     public function handle()
@@ -37,39 +35,33 @@ class HandleZipMappingJob implements ShouldQueue
             return;
         }
 
+        Log::info("🚀 Iniciando HandleZipMappingJob", [
+            'batch_id' => $this->batchId,
+            'project_id' => $this->projectId,
+            'mapping_count' => count($this->mapping),
+            'zip_path' => $this->zipPath,
+            'extracted_path' => $this->extractedPath
+        ]);
+
+        // ✅ Marcar como procesando y establecer total
+        $batch->update([
+            'status' => 'processing',
+            'total' => count($this->mapping),
+            'processed' => 0,
+            'errors' => 0
+        ]);
+
         try {
-            Log::info("🚀 Iniciando HandleZipMappingJob", [
-                'batch_id' => $this->batchId,
-                'project_id' => $this->projectId,
-                'mapping_count' => count($this->mapping),
-                'zip_path' => $this->zipPath,
-                'extracted_path' => $this->extractedPath
-            ]);
+            $tempPath = $this->prepareExtractionPath();
 
-            // ✅ Marcar como procesando y establecer total
-            $batch->update([
-                'status' => 'processing',
-                'total' => count($this->mapping),
-                'processed' => 0,
-                'errors' => 0,
-                'started_at' => now()
-            ]);
+            Log::info("📁 Usando directorio de extracción: {$tempPath}");
 
-            // ✅ Determinar ruta de extracción
-            $tempExtractPath = $this->getOrCreateExtractPath();
-
-            if (!$tempExtractPath || !is_dir($tempExtractPath)) {
-                throw new \Exception('No se pudo acceder a los archivos extraídos');
-            }
-
-            Log::info("📁 Usando directorio de extracción: {$tempExtractPath}");
-
-            // ✅ Despachar jobs individuales para cada imagen (MÉTODO ORIGINAL)
+            // ✅ Despachar TODOS los jobs
             foreach ($this->mapping as $asignacion) {
                 dispatch(new ProcessZipImageJob(
                     $this->projectId,
                     $asignacion,
-                    $tempExtractPath,
+                    $tempPath,
                     $this->batchId
                 ))->onQueue('images');
             }
@@ -77,97 +69,55 @@ class HandleZipMappingJob implements ShouldQueue
             Log::info("✅ Despachados " . count($this->mapping) . " ProcessZipImageJob para batch {$this->batchId}");
 
         } catch (\Throwable $e) {
-            Log::error("❌ Error en HandleZipMappingJob: " . $e->getMessage(), [
-                'batch_id' => $this->batchId,
-                'trace' => $e->getTraceAsString()
-            ]);
-
-            $batch->update([
-                'status' => 'failed',
-                'error_messages' => [$e->getMessage()],
-                'completed_at' => now()
-            ]);
+            Log::error("❌ Error en HandleZipMappingJob: " . $e->getMessage());
+            $batch->update(['status' => 'failed']);
         } finally {
-            // ✅ Limpiar archivos temporales SOLO si los creamos nosotros
-            if ($this->zipPath && $this->extractedPath === null) {
-                $this->cleanup($tempExtractPath);
+            // ✅ Limpiar ZIP original solo si se proporcionó y se extrajo
+            if ($this->zipPath && file_exists($this->zipPath) && !$this->extractedPath) {
+                @unlink($this->zipPath);
+                Log::debug("🗑️ ZIP original eliminado: {$this->zipPath}");
             }
         }
     }
 
     /**
-     * ✅ Obtener o crear ruta de extracción
+     * ✅ NUEVA FUNCIÓN: Preparar directorio de extracción
      */
-    private function getOrCreateExtractPath(): ?string
+    private function prepareExtractionPath(): string
     {
-        // ✅ Caso 1: Usar archivos ya extraídos (flujo nuevo con análisis previo)
-        if ($this->extractedPath) {
+        // Si ya hay archivos extraídos, usarlos
+        if ($this->extractedPath && is_dir($this->extractedPath)) {
             Log::info("📁 Usando archivos ya extraídos: {$this->extractedPath}");
-
-            if (is_dir($this->extractedPath)) {
-                return $this->extractedPath;
-            } else {
-                Log::error("❌ Directorio extraído no existe: {$this->extractedPath}");
-                return null;
-            }
+            return $this->extractedPath;
         }
 
-        // ✅ Caso 2: Extraer ZIP nosotros (flujo original)
-        if ($this->zipPath && file_exists($this->zipPath)) {
-            Log::info("📦 Extrayendo ZIP: {$this->zipPath}");
-            return $this->extractZipFile();
+        // Si no, extraer el ZIP
+        if (!$this->zipPath || !file_exists($this->zipPath)) {
+            throw new \Exception("No se proporcionó ZIP path válido y no hay archivos extraídos");
         }
 
-        throw new \Exception('No hay ZIP ni archivos extraídos disponibles');
-    }
-
-    /**
-     * ✅ Extraer ZIP (lógica original)
-     */
-    private function extractZipFile(): string
-    {
-        $tempExtractPath = storage_path("app/temp_extract_" . $this->batchId . "_" . time());
-
-        // ✅ Limpiar directorio si existe
-        if (File::exists($tempExtractPath)) {
-            File::deleteDirectory($tempExtractPath);
+        // Crear directorio temporal para extracción
+        $tempPath = storage_path("app/temp_extract_" . $this->batchId . "_" . time());
+        if (File::exists($tempPath)) {
+            File::deleteDirectory($tempPath);
         }
-        File::makeDirectory($tempExtractPath, 0755, true);
+        File::makeDirectory($tempPath, 0755, true);
 
+        // Extraer ZIP
         $zip = new \ZipArchive;
         if ($zip->open($this->zipPath) !== true) {
-            throw new \Exception('No se pudo abrir el ZIP');
+            throw new \Exception("No se pudo abrir el ZIP: {$this->zipPath}");
         }
 
-        if (!$zip->extractTo($tempExtractPath)) {
+        if (!$zip->extractTo($tempPath)) {
             $zip->close();
-            throw new \Exception('No se pudo extraer el ZIP');
+            throw new \Exception("No se pudo extraer el ZIP a: {$tempPath}");
         }
 
         $zip->close();
+        Log::info("✅ ZIP extraído en: {$tempPath}");
 
-        Log::info("📂 ZIP extraído correctamente a: {$tempExtractPath}");
-        return $tempExtractPath;
-    }
-
-    /**
-     * ✅ Limpiar archivos temporales (solo si los creamos nosotros)
-     */
-    private function cleanup(string $tempPath): void
-    {
-        try {
-            if (is_dir($tempPath)) {
-                File::deleteDirectory($tempPath);
-                Log::info("🗑️ Directorio temporal eliminado: {$tempPath}");
-            }
-
-            if ($this->zipPath && file_exists($this->zipPath)) {
-                @unlink($this->zipPath);
-                Log::info("🗑️ ZIP eliminado: {$this->zipPath}");
-            }
-        } catch (\Exception $e) {
-            Log::warning("⚠️ Error limpiando archivos temporales: " . $e->getMessage());
-        }
+        return $tempPath;
     }
 
     public function failed(\Throwable $exception): void
@@ -176,11 +126,12 @@ class HandleZipMappingJob implements ShouldQueue
 
         $batch = ImageBatch::find($this->batchId);
         if ($batch) {
-            $batch->update([
-                'status' => 'failed',
-                'error_messages' => [$exception->getMessage()],
-                'completed_at' => now()
-            ]);
+            $batch->update(['status' => 'failed']);
+        }
+
+        // Limpiar archivos en caso de fallo
+        if ($this->zipPath && file_exists($this->zipPath)) {
+            @unlink($this->zipPath);
         }
     }
 }

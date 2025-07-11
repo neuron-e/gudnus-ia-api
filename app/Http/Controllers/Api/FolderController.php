@@ -258,7 +258,6 @@ class FolderController extends Controller
 
         Log::info("🏗️ Generando {$modules} módulos para proyecto {$project->id}");
 
-        $created = [];
         $batchSize = 500; // Procesar en lotes de 500
 
         try {
@@ -273,46 +272,49 @@ class FolderController extends Controller
                 ], 400);
             }
 
-            // ✅ Generar en lotes para mejor performance
-            for ($batch = 0; $batch < ceil($modules / $batchSize); $batch++) {
-                $startIdx = $batch * $batchSize + 1;
-                $endIdx = min(($batch + 1) * $batchSize, $modules);
+            $totalCreated = 0;
 
-                $batchData = [];
+            // ✅ Crear módulos uno por uno para usar el método generateFullPath()
+            for ($i = 1; $i <= $modules; $i++) {
+                $moduleName = "Módulo {$i}";
 
-                for ($i = $startIdx; $i <= $endIdx; $i++) {
-                    $batchData[] = [
-                        'project_id' => $project->id,
-                        'parent_id' => null,
-                        'name' => "Módulo {$i}",
-                        'type' => 'modulo',
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ];
+                // ✅ Crear usando Eloquent para que se disparen los eventos del modelo
+                $folder = Folder::create([
+                    'project_id' => $project->id,
+                    'parent_id' => null,
+                    'name' => $moduleName,
+                    'type' => 'modulo',
+                ]);
+
+                // ✅ Generar y asignar full_path usando el método del modelo
+                $folder->full_path = $folder->generateFullPath();
+                $folder->save();
+
+                $totalCreated++;
+
+                // ✅ Log cada lote de 100 para no saturar logs
+                if ($i % 100 === 0) {
+                    Log::info("📁 Creados {$i}/{$modules} módulos...");
                 }
-
-                // ✅ Inserción masiva para mejor performance
-                $insertedIds = Folder::insert($batchData);
-                $batchCount = $batch + 1;
-                Log::info("📁 Lote {$batchCount}: Módulos {$startIdx}-{$endIdx} creados");
             }
-
-            // ✅ Recuperar todos los módulos creados para respuesta
-            $allCreated = Folder::where('project_id', $project->id)
-                ->where('type', 'modulo')
-                ->orderBy('name')
-                ->get();
 
             DB::commit();
 
-            Log::info("✅ Estructura básica generada: {$modules} módulos para proyecto {$project->id}");
+            Log::info("✅ Estructura básica generada: {$totalCreated} módulos para proyecto {$project->id}");
+
+            // ✅ Recuperar algunos módulos para la respuesta
+            $sampleModules = Folder::where('project_id', $project->id)
+                ->where('type', 'modulo')
+                ->orderBy('name')
+                ->take(5)
+                ->get(['id', 'name', 'full_path']);
 
             return response()->json([
                 'ok' => true,
-                'created_count' => $allCreated->count(),
-                'message' => "Se crearon {$modules} módulos correctamente",
-                'modules' => $allCreated->take(10), // Solo primeros 10 para respuesta
-                'total_modules' => $allCreated->count()
+                'created_count' => $totalCreated,
+                'message' => "Se crearon {$totalCreated} módulos correctamente",
+                'sample_modules' => $sampleModules,
+                'total_modules' => $totalCreated
             ]);
 
         } catch (\Exception $e) {
@@ -321,6 +323,99 @@ class FolderController extends Controller
 
             return response()->json([
                 'error' => 'Error generando módulos: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * ✅ MÉTODO OPTIMIZADO: Arreglar módulos existentes sin full_path
+     */
+    public function fixMissingFullPaths(Project $project): \Illuminate\Http\JsonResponse
+    {
+        Log::info("🔧 Arreglando full_paths faltantes para proyecto {$project->id}");
+
+        try {
+            DB::beginTransaction();
+
+            // Encontrar folders sin full_path o con full_path vacío
+            $foldersToFix = Folder::where('project_id', $project->id)
+                ->where(function($query) {
+                    $query->whereNull('full_path')
+                        ->orWhere('full_path', '');
+                })
+                ->get();
+
+            $fixedCount = 0;
+
+            foreach ($foldersToFix as $folder) {
+                // ✅ Usar el método existente del modelo
+                $folder->full_path = $folder->generateFullPath();
+                $folder->save();
+                $fixedCount++;
+
+                Log::debug("✅ Fijado: {$folder->name} -> full_path: {$folder->full_path}");
+            }
+
+            DB::commit();
+            Log::info("✅ Arreglados {$fixedCount} full_paths");
+
+            return response()->json([
+                'ok' => true,
+                'fixed_count' => $fixedCount,
+                'message' => "Se arreglaron {$fixedCount} full_paths"
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error("❌ Error arreglando full_paths: " . $e->getMessage());
+
+            return response()->json([
+                'error' => 'Error arreglando full_paths: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * ✅ MÉTODO PARA REGENERAR TODOS LOS FULL_PATHS
+     */
+    public function regenerateAllFullPaths(Project $project): \Illuminate\Http\JsonResponse
+    {
+        Log::info("🔄 Regenerando todos los full_paths para proyecto {$project->id}");
+
+        try {
+            DB::beginTransaction();
+
+            $folders = Folder::where('project_id', $project->id)->get();
+            $updatedCount = 0;
+
+            foreach ($folders as $folder) {
+                $oldPath = $folder->full_path;
+                $newPath = $folder->generateFullPath();
+
+                if ($oldPath !== $newPath) {
+                    $folder->full_path = $newPath;
+                    $folder->save();
+                    $updatedCount++;
+
+                    Log::debug("🔄 Actualizado: '{$oldPath}' -> '{$newPath}'");
+                }
+            }
+
+            DB::commit();
+            Log::info("✅ Regenerados {$updatedCount} full_paths");
+
+            return response()->json([
+                'ok' => true,
+                'updated_count' => $updatedCount,
+                'message' => "Se regeneraron {$updatedCount} full_paths"
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error("❌ Error regenerando full_paths: " . $e->getMessage());
+
+            return response()->json([
+                'error' => 'Error regenerando full_paths: ' . $e->getMessage()
             ], 500);
         }
     }

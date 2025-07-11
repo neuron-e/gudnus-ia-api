@@ -31,6 +31,15 @@ class ProcessZipImageJob implements ShouldQueue
 
     public function handle()
     {
+        // ✅ AGREGAR LOG INICIAL
+        Log::info("🚀 ProcessZipImageJob iniciado", [
+            'batch_id' => $this->batchId,
+            'project_id' => $this->projectId,
+            'imagen' => $this->asignacion['imagen'] ?? 'N/A',
+            'modulo' => $this->asignacion['modulo'] ?? 'N/A',
+            'temp_path' => $this->tempPath
+        ]);
+
         $batch = ImageBatch::find($this->batchId);
         if (!$batch) {
             Log::error("❌ Batch no encontrado: {$this->batchId}");
@@ -39,6 +48,11 @@ class ProcessZipImageJob implements ShouldQueue
 
         $nombreImagen = basename($this->asignacion['imagen']);
         $moduloPath = trim($this->asignacion['modulo']);
+
+        Log::debug("📋 Procesando imagen", [
+            'nombre_imagen' => $nombreImagen,
+            'modulo_path' => $moduloPath
+        ]);
 
         // Buscar archivo extraído
         $extractedFile = null;
@@ -54,6 +68,8 @@ class ProcessZipImageJob implements ShouldQueue
             return;
         }
 
+        Log::debug("✅ Archivo encontrado: {$extractedFile}");
+
         // Buscar folder
         $folder = Folder::where('project_id', $this->projectId)
             ->where('full_path', $moduloPath)
@@ -63,6 +79,11 @@ class ProcessZipImageJob implements ShouldQueue
             $this->incrementError($batch, "Módulo no encontrado: {$moduloPath}");
             return;
         }
+
+        Log::debug("✅ Folder encontrado", [
+            'folder_id' => $folder->id,
+            'folder_name' => $folder->name
+        ]);
 
         try {
             // Eliminar imágenes existentes en el folder
@@ -75,9 +96,15 @@ class ProcessZipImageJob implements ShouldQueue
                 $existing->delete();
             }
 
-            // Subir nueva imagen
+            // ✅ CORREGIR: Subir nueva imagen - FIX DEL PATH
             $imageContent = file_get_contents($extractedFile);
             $wasabiPath = "projects/{$this->projectId}/images/" . uniqid('zip_') . '_' . $nombreImagen;
+
+            Log::debug("📤 Subiendo imagen a Wasabi", [
+                'wasabi_path' => $wasabiPath,
+                'image_size' => strlen($imageContent)
+            ]);
+
             Storage::disk('wasabi')->put($wasabiPath, $imageContent);
 
             // Crear imagen
@@ -86,6 +113,12 @@ class ProcessZipImageJob implements ShouldQueue
                 'original_path' => $wasabiPath,
                 'status' => 'uploaded',
                 'is_counted' => false,
+            ]);
+
+            Log::info("✅ Imagen creada en BD", [
+                'image_id' => $image->id,
+                'folder_id' => $folder->id,
+                'wasabi_path' => $wasabiPath
             ]);
 
             // Procesar imagen
@@ -97,17 +130,27 @@ class ProcessZipImageJob implements ShouldQueue
                 $image->update(['is_counted' => true]);
                 $batch->increment('processed');
                 $batch->touch();
+
+                Log::info("✅ Imagen procesada exitosamente", [
+                    'image_id' => $image->id,
+                    'batch_processed' => $batch->fresh()->processed
+                ]);
             } else {
                 $this->incrementError($batch, "Fallo al procesar: {$nombreImagen}");
             }
 
         } catch (\Throwable $e) {
+            Log::error("❌ Error procesando imagen {$nombreImagen}: " . $e->getMessage(), [
+                'exception' => $e->getTraceAsString()
+            ]);
             $this->incrementError($batch, "Error procesando {$nombreImagen}: " . $e->getMessage());
         }
     }
 
     private function incrementError(ImageBatch $batch, string $message): void
     {
+        Log::error("❌ Error en ProcessZipImageJob: {$message}");
+
         $batch->increment('errors');
 
         $errors = $batch->error_messages ?? [];
@@ -121,6 +164,12 @@ class ProcessZipImageJob implements ShouldQueue
 
     public function failed(\Throwable $e): void
     {
+        Log::error("❌ ProcessZipImageJob FAILED", [
+            'batch_id' => $this->batchId,
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+
         $batch = ImageBatch::find($this->batchId);
         if ($batch) {
             $this->incrementError($batch, "Job failed: " . $e->getMessage());

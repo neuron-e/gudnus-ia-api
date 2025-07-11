@@ -13,6 +13,7 @@ use App\Models\ZipAnalysis;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\DB;
 
 class LargeZipController extends Controller
 {
@@ -125,7 +126,7 @@ class LargeZipController extends Controller
     }
 
     /**
-     * ✅ Procesar asignación de ZIP analizado
+     * ✅ Procesar asignación de ZIP analizado CON CREACIÓN AUTOMÁTICA DE MÓDULOS
      */
     public function processAnalyzedZip(Request $request, $analysisId)
     {
@@ -167,10 +168,17 @@ class LargeZipController extends Controller
 
             Log::info("📤 Procesando ZIP analizado {$analysisId} con " . count($mapping) . " asignaciones");
 
+            // ✅ NUEVO: VERIFICAR Y CREAR MÓDULOS AUTOMÁTICAMENTE
+            $modulesCreated = $this->ensureModulesExist($projectId, $mapping);
+
+            if ($modulesCreated > 0) {
+                Log::info("✅ Creados {$modulesCreated} módulos automáticamente para proyecto {$projectId}");
+            }
+
             // ✅ Crear batch igual que en uploadWithMapping
             $batch = ImageBatch::create([
                 'project_id' => $projectId,
-                'type' => 'zip-mapping',
+                'type' => 'large-zip-mapping',
                 'total' => count($mapping),
                 'status' => 'processing',
                 'temp_path' => $extractedPath, // ✅ Usar carpeta ya extraída
@@ -190,14 +198,16 @@ class LargeZipController extends Controller
                 'project_id' => $projectId,
                 'batch_id' => $batch->id,
                 'mapping_count' => count($mapping),
-                'extracted_path' => $extractedPath
+                'extracted_path' => $extractedPath,
+                'modules_created' => $modulesCreated
             ]);
 
             return response()->json([
                 'ok' => true,
                 'msg' => 'ZIP recibido correctamente. Se está procesando en segundo plano...',
                 'batch_id' => $batch->id,
-                'analysis_id' => $analysisId
+                'analysis_id' => $analysisId,
+                'modules_created' => $modulesCreated
             ]);
 
         } catch (\Exception $e) {
@@ -207,6 +217,113 @@ class LargeZipController extends Controller
                 'error' => 'Error procesando el ZIP: ' . $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * ✅ FUNCIÓN CORREGIDA: Asegurar que existen los módulos necesarios
+     */
+    private function ensureModulesExist(int $projectId, array $mapping): int
+    {
+        Log::info("🔍 Verificando módulos necesarios para proyecto {$projectId}");
+
+        // Obtener todos los módulos únicos del mapping
+        $modulesNeeded = [];
+        foreach ($mapping as $item) {
+            $modulePath = trim($item['modulo']);
+            if (!empty($modulePath)) {
+                $modulesNeeded[$modulePath] = true;
+            }
+        }
+
+        $uniqueModules = array_keys($modulesNeeded);
+        Log::info("📋 Módulos únicos necesarios: " . count($uniqueModules));
+
+        // ✅ Verificar cuáles existen usando full_path
+        $existingModules = Folder::where('project_id', $projectId)
+            ->whereIn('full_path', $uniqueModules)
+            ->pluck('full_path')
+            ->toArray();
+
+        $missingModules = array_diff($uniqueModules, $existingModules);
+
+        Log::info("📊 Módulos existentes: " . count($existingModules) . ", Faltantes: " . count($missingModules));
+
+        if (empty($missingModules)) {
+            Log::info("✅ Todos los módulos ya existen");
+            return 0;
+        }
+
+        // Crear módulos faltantes
+        return $this->createMissingModules($projectId, $missingModules);
+    }
+
+    /**
+     * ✅ NUEVA FUNCIÓN: Crear módulos faltantes
+     */
+    private function createMissingModules(int $projectId, array $missingModules): int
+    {
+        Log::info("🔧 Creando " . count($missingModules) . " módulos faltantes para proyecto {$projectId}");
+
+        $created = 0;
+
+        try {
+            DB::beginTransaction();
+
+            foreach ($missingModules as $modulePath) {
+                $parts = explode(' / ', $modulePath);
+                $parentId = null;
+
+                foreach ($parts as $index => $part) {
+                    // ✅ Determinar tipo basado en la posición
+                    $type = ($index === count($parts) - 1) ? 'modulo' : 'folder';
+
+                    // ✅ Buscar si ya existe este folder con este parent
+                    $existing = Folder::where('project_id', $projectId)
+                        ->where('parent_id', $parentId)
+                        ->where('name', $part)
+                        ->first();
+
+                    if (!$existing) {
+                        // ✅ Crear usando Eloquent para que funcionen los métodos del modelo
+                        $folder = Folder::create([
+                            'project_id' => $projectId,
+                            'parent_id' => $parentId,
+                            'name' => $part,
+                            'type' => $type,
+                        ]);
+
+                        // ✅ Generar full_path usando el método del modelo
+                        $folder->full_path = $folder->generateFullPath();
+                        $folder->save();
+
+                        Log::debug("✅ Creado: '{$folder->full_path}' (ID: {$folder->id}, Tipo: {$type})");
+                        $created++;
+                        $parentId = $folder->id;
+                    } else {
+                        // ✅ Usar el ID existente como parent para el siguiente nivel
+                        $parentId = $existing->id;
+                        Log::debug("🔁 Ya existe: '{$existing->full_path}' (ID: {$existing->id})");
+
+                        // ✅ Verificar y corregir full_path si está vacío
+                        if (empty($existing->full_path)) {
+                            $existing->full_path = $existing->generateFullPath();
+                            $existing->save();
+                            Log::debug("🔧 Corregido full_path: '{$existing->full_path}'");
+                        }
+                    }
+                }
+            }
+
+            DB::commit();
+            Log::info("✅ Creados {$created} módulos/folders correctamente");
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error("❌ Error creando módulos: " . $e->getMessage());
+            throw $e;
+        }
+
+        return $created;
     }
 
     private function estimateAnalysisTime($fileSize): int
