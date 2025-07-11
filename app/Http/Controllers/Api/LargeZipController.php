@@ -275,7 +275,7 @@ class LargeZipController extends Controller
 
                 foreach ($parts as $index => $part) {
                     // ✅ Determinar tipo basado en la posición
-                    $type = ($index === count($parts) - 1) ? 'modulo' : 'folder';
+                    $type = 'modulo';
 
                     // ✅ Buscar si ya existe este folder con este parent
                     $existing = Folder::where('project_id', $projectId)

@@ -50,6 +50,10 @@ class FolderController extends Controller
             'parent_id' => $validated['parent_id'] ?? null,
         ]);
 
+        // ✅ Generar y asignar full_path usando el método del modelo
+        $folder->full_path = $folder->generateFullPath();
+        $folder->save();
+
         return response()->json($folder, 201);
     }
 
@@ -235,6 +239,10 @@ class FolderController extends Controller
                 'name' => $name,
                 'type' => $type,
             ]);
+
+            // ✅ Generar y asignar full_path usando el método del modelo
+            $folder->full_path = $folder->generateFullPath();
+            $folder->save();
 
             $folderMap[$level][$key] = $folder->id;
             Log::info("📁 Creado: {$folder->name} ({$folder->type}) bajo parent_id={$parentId}");
