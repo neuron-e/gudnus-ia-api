@@ -47,6 +47,8 @@ class ProcessZipImageJob implements ShouldQueue
         }
 
         $nombreImagen = basename($this->asignacion['imagen']);
+        $extension = pathinfo($nombreImagen, PATHINFO_EXTENSION);
+        $nameWithoutExt = pathinfo($nombreImagen, PATHINFO_FILENAME);
         $moduloPath = trim($this->asignacion['modulo']);
 
         Log::debug("📋 Procesando imagen", [
@@ -98,7 +100,8 @@ class ProcessZipImageJob implements ShouldQueue
 
             // ✅ CORREGIR: Subir nueva imagen - FIX DEL PATH
             $imageContent = file_get_contents($extractedFile);
-            $wasabiPath = "projects/{$this->projectId}/images/" . uniqid('zip_') . '_' . $nombreImagen;
+
+            $wasabiPath = "projects/{$this->projectId}/images/{$nombreImagen}";
 
             Log::debug("📤 Subiendo imagen a Wasabi", [
                 'wasabi_path' => $wasabiPath,

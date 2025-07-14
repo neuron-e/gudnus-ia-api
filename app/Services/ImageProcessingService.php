@@ -93,9 +93,9 @@ class ImageProcessingService
         }
 
         // ✅ Paths temporales con ID único
-        $uniqueId = uniqid('proc_' . $image->id . '_', true);
-        $filename = 'aligned_' . $uniqueId . '.jpg';
-        $originalTemp = $tmpDir . '/original_' . $uniqueId . '.jpg';
+        $nameWithoutExt = pathinfo($image->filename ?? 'panel', PATHINFO_FILENAME);
+        $filename = 'processed_' . $nameWithoutExt . '.jpg';
+        $originalTemp = $tmpDir . '/original_' . $filename;
         $outputTemp = $tmpDir . '/' . $filename;
         $wasabiProcessedPath = "projects/{$image->project_id}/images/processed/{$filename}";
 
