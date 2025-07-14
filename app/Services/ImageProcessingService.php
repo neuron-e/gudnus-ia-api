@@ -51,7 +51,8 @@ class ImageProcessingService
 
         // ✅ Verificar configuración de Python
         $pythonPath = env('PYTHON_PATH', '/usr/bin/python3');
-        $scriptPath = storage_path('app/scripts/process_image_improved.py');
+        $scriptPath = storage_path('app/scripts/process_image_wrapped.py');
+        $modelPath = storage_path('app/scripts/best.pt'); // ✅ Modelo YOLO
 
         Log::debug("🐍 Configuración Python:", [
             'python_path' => $pythonPath,
@@ -143,7 +144,7 @@ class ImageProcessingService
         }
 
         // ✅ Ejecutar script Python con mejor logging
-        $cmd = "\"$pythonPath\" \"$scriptPath\" \"$originalTemp\" \"$outputTemp\"";
+        $cmd = "\"$pythonPath\" \"$scriptPath\" \"$originalTemp\" \"$outputTemp\" \"$modelPath\"";
         Log::debug("🐍 Ejecutando comando Python:", ['cmd' => $cmd]);
 
         // ✅ Ejecutar con timeout y captura de errores
