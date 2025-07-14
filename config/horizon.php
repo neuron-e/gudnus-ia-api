@@ -228,7 +228,7 @@ return [
                 'maxProcesses' => 10, // ✅ Más workers para 2000 imágenes
                 'tries' => 3,
                 'timeout' => 900,    // 15 minutos por imagen
-                'memory' => 256,
+                'memory' => 512,
                 'sleep' => 2,
                 'maxJobs' => 50,     // Restart más frecuente para liberar memoria
                 'rest' => 15,
@@ -258,7 +258,7 @@ return [
                 'processes' => 2,     // Pocos workers, jobs muy pesados
                 'tries' => 2,
                 'timeout' => 3600,    // 1 hora para ZIPs muy grandes
-                'memory' => 512,      // Mucha memoria para ZIPs grandes
+                'memory' => 1024,      // Mucha memoria para ZIPs grandes
                 'sleep' => 5,
                 'maxJobs' => 10,      // Restart frecuente
                 'rest' => 60,
@@ -273,7 +273,7 @@ return [
                 'maxProcesses' => 3, // Máximo 3 descargas simultáneas
                 'tries' => 2,
                 'timeout' => 7200, // 2 horas timeout
-                'memory' => 512, // Más memoria para ZIPs grandes
+                'memory' => 1024, // Más memoria para ZIPs grandes
                 'sleep' => 5,
                 'maxJobs' => 10,
                 'rest' => 300, // 5 minutos de descanso cada 10 jobs
