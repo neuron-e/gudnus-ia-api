@@ -23,7 +23,7 @@ class LargeZipController extends Controller
     public function uploadLargeZip(Request $request, Project $project)
     {
         $request->validate([
-            'zip' => 'required|file|mimes:zip|max:5242880', // 5GB máximo
+            'zip' => 'required|file|mimes:zip', // 5GB máximo
         ]);
 
         try {
