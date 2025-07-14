@@ -178,24 +178,53 @@ class DownloadController extends Controller
                 return basename($path) === $filename;
             });
 
-            if (!$targetPath || !file_exists($targetPath)) {
+            if (!$targetPath) {
                 return response()->json(['error' => 'Archivo no encontrado: ' . $filename], 404);
             }
 
-            return response()->download($targetPath);
+            return $this->downloadSingleFile($targetPath);
         }
 
         // ✅ Si solo hay un archivo, descarga directa
         if (count($filePaths) === 1) {
-            $filePath = $filePaths[0];
-            if (!file_exists($filePath)) {
-                return response()->json(['error' => 'Archivo no encontrado'], 404);
-            }
-            return response()->download($filePath);
+            return $this->downloadSingleFile($filePaths[0]);
         }
 
-        // ✅ Si hay múltiples archivos, crear ZIP temporal con todos
+        // ✅ Si hay múltiples archivos, crear ZIP temporal
         return $this->downloadMultipleFiles($filePaths, $batch);
+    }
+
+    /**
+     * ✅ NUEVO: Descargar un solo archivo (local o Wasabi)
+     */
+    private function downloadSingleFile($filePath)
+    {
+        // ✅ Verificar si es ruta de Wasabi (empieza con downloads/)
+        if (str_starts_with($filePath, 'downloads/')) {
+            $wasabi = Storage::disk('wasabi');
+            if (!$wasabi->exists($filePath)) {
+                return response()->json(['error' => 'Archivo no encontrado en Wasabi'], 404);
+            }
+
+            // ✅ Crear archivo temporal para descarga
+            $tempPath = storage_path('app/tmp/' . basename($filePath));
+
+            // Asegurar que existe el directorio tmp
+            if (!is_dir(dirname($tempPath))) {
+                mkdir(dirname($tempPath), 0755, true);
+            }
+
+            file_put_contents($tempPath, $wasabi->get($filePath));
+
+            return response()->download($tempPath)->deleteFileAfterSend(true);
+        }
+
+        // ✅ Archivo local tradicional
+        if (!file_exists($filePath)) {
+            return response()->json(['error' => 'Archivo no encontrado'], 404);
+        }
+
+        return response()->download($filePath);
     }
 
     /**
@@ -306,12 +335,43 @@ class DownloadController extends Controller
 
         return collect($batch->file_paths)->map(function($path) use ($batch) {
             $filename = basename($path);
+
+            // ✅ Determinar tamaño del archivo
+            $size = 'Desconocido';
+            if (str_starts_with($path, 'downloads/')) {
+                // Archivo en Wasabi
+                $wasabi = Storage::disk('wasabi');
+                if ($wasabi->exists($path)) {
+                    $size = $this->formatFileSize($wasabi->size($path));
+                }
+            } else {
+                // Archivo local
+                if (file_exists($path)) {
+                    $size = $this->formatFileSize(filesize($path));
+                }
+            }
+
             return [
                 'filename' => $filename,
                 'url' => route('downloads.file', ['batchId' => $batch->id, 'filename' => $filename]),
-                'size' => file_exists($path) ? $this->formatFileSize(filesize($path)) : 'Desconocido'
+                'size' => $size,
+                'storage_type' => str_starts_with($path, 'downloads/') ? 'wasabi' : 'local'
             ];
         })->toArray();
+    }
+
+    /**
+     * ✅ NUEVO: Limpiar archivos locales después de mover a Wasabi
+     */
+    private function cleanupLocalFiles($filePaths): void
+    {
+        foreach ($filePaths as $path) {
+            // Solo eliminar archivos locales (no rutas de Wasabi)
+            if (!str_starts_with($path, 'downloads/') && file_exists($path)) {
+                @unlink($path);
+                Log::debug("🗑️ Archivo local eliminado después de mover a Wasabi: {$path}");
+            }
+        }
     }
 
     private function cleanupOldBatches($projectId, $type)

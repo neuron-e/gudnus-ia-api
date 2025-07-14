@@ -16,7 +16,9 @@ use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
+use Intervention\Image\Drivers\Imagick\Driver as ImagickDriver;
 use Intervention\Image\Geometry\Rectangle;
+use Intervention\Image\ImageManager;
 use Intervention\Image\Typography\Font;
 
 class GenerateReportJob implements ShouldQueue
@@ -30,7 +32,7 @@ class GenerateReportJob implements ShouldQueue
     public function __construct(
         public int $projectId,
         public ?string $userEmail = null,
-        public int $maxImagesPerPage = 50, // ✅ Limitar imágenes por página
+        public int $maxImagesPerPage = 50,
         public bool $includeAnalyzedImages = true
     ) {}
 
@@ -74,9 +76,9 @@ class GenerateReportJob implements ShouldQueue
             ]);
 
             // ✅ 4. Enviar notificación por email
-            if ($this->userEmail) {
+     /*       if ($this->userEmail) {
                 Mail::to($this->userEmail)->send(new ReportGeneratedMail($reportGeneration));
-            }
+            }*/
 
             Log::info("✅ PDF generado exitosamente para proyecto {$this->projectId}");
 
@@ -109,7 +111,7 @@ class GenerateReportJob implements ShouldQueue
             // Generar PDF
             $pdfPath = $this->generatePDF($project, $images, $analyzedImages, $tempDir);
 
-            // Mover a storage permanente
+            // Mover a storage final
             $finalPath = $this->moveToFinalStorage($pdfPath, $project);
 
             $reportGeneration->update(['file_path' => $finalPath]);
@@ -141,15 +143,14 @@ class GenerateReportJob implements ShouldQueue
                     $chunk,
                     $analyzedImages,
                     $tempDir,
-                    $index + 1, // número de parte
-                    $chunks->count() // total de partes
+                    $index + 1,
+                    $chunks->count()
                 );
 
                 $pdfPaths[] = $partialPdfPath;
-
             }
 
-            // ✅ Opcional: Combinar PDFs si es necesario
+            // Mover archivos a storage final
             if (count($pdfPaths) === 1) {
                 $finalPath = $this->moveToFinalStorage($pdfPaths[0], $project);
             } else {
@@ -164,7 +165,7 @@ class GenerateReportJob implements ShouldQueue
     }
 
     /**
-     * ✅ Pre-generar imágenes analizadas en chunks para reducir memoria
+     * ✅ CORREGIDO: Pre-generar imágenes analizadas usando la MISMA lógica que GenerateDownloadZipJob
      */
     private function preGenerateAnalyzedImages($images, $tempDir, $reportGeneration): array
     {
@@ -179,23 +180,25 @@ class GenerateReportJob implements ShouldQueue
             if (!$image->processedImage) continue;
 
             try {
-                $analyzedPath = $this->generateSingleAnalyzedImage($image->processedImage, $tempDir);
-                if ($analyzedPath) {
+                // ✅ NUEVO: Usar la misma lógica que GenerateDownloadZipJob
+                $analyzedContent = $this->generateAnalyzedImageContent($image->processedImage);
+
+                if ($analyzedContent) {
+                    // Guardar el contenido en un archivo temporal
+                    $analyzedPath = $tempDir . '/analyzed_' . uniqid() . '.jpg';
+                    file_put_contents($analyzedPath, $analyzedContent);
                     $analyzedImages[$image->id] = $analyzedPath;
                 }
-            } catch (\Exception $e) {
-                Log::warning("Error generando imagen analizada para imagen {$image->id}: " . $e->getLine());
-                Log::warning("Error generando imagen analizada para imagen {$image->id}: " . $e->getFile());
-                Log::warning("Error generando imagen analizada para imagen {$image->id}: " . $e->getMessage());
 
+            } catch (\Exception $e) {
+                Log::warning("Error generando imagen analizada para imagen {$image->id}: " . $e->getMessage());
             }
 
             $processed++;
-            // Update progress
             $reportGeneration->increment('processed_images');
-            $reportGeneration->refresh(); // ✅ ahora refleja el valor actualizado
+            $reportGeneration->refresh();
 
-            // ✅ Liberar memoria cada 10 imágenes
+            // Liberar memoria cada 10 imágenes
             if ($processed % 10 === 0) {
                 $this->freeMemory();
             }
@@ -205,107 +208,103 @@ class GenerateReportJob implements ShouldQueue
     }
 
     /**
-     * ✅ Generar una sola imagen analizada y guardarla en disco
+     * 🆕 NUEVO: Usar EXACTAMENTE la misma lógica que GenerateDownloadZipJob
      */
-    private function generateSingleAnalyzedImage(ProcessedImage $processed, $tempDir): ?string
+    private function generateAnalyzedImageContent($processedImage): ?string
     {
-        $wasabi = Storage::disk('wasabi');
-        if (!$wasabi->exists($processed->corrected_path)) return null;
-
-        // Usar archivo temporal en lugar de base64
-        $tempImagePath = $tempDir . '/temp_' . uniqid() . '.jpg';
-        file_put_contents($tempImagePath, $wasabi->get($processed->corrected_path));
-
-        if (!file_exists($tempImagePath)) return null;
-
         try {
-            $manager = new \Intervention\Image\ImageManager(new \Intervention\Image\Drivers\Imagick\Driver());
-            $image = $manager->read($tempImagePath);
-
-            // Aplicar las anotaciones (mismo código que antes)
-            $this->applyAnnotationsToImage($image, $processed);
-
-            // Guardar imagen analizada
-            $analyzedPath = $tempDir . '/analyzed_' . uniqid() . '.jpg';
-            $image->toJpeg(85)->save($analyzedPath);
-
-            return $analyzedPath;
-
-        } finally {
-            // Limpiar archivo temporal original
-            @unlink($tempImagePath);
-        }
-    }
-
-    /**
-     * ✅ Aplicar anotaciones a la imagen (extraído del código original)
-     */
-    private function applyAnnotationsToImage($image, ProcessedImage $processed): void
-    {
-        $json = $processed->error_edits_json ?: $processed->ai_response_json;
-        $prob = $processed->min_probability ?? 0.5;
-        $response = json_decode($json, true);
-
-        if (!isset($response['predictions'])) return;
-
-        $filteredPredictions = array_filter($response['predictions'], function($prediction) use ($prob) {
-            return !isset($prediction['probability']) || $prediction['probability'] >= $prob;
-        });
-
-        $errorColors = [
-            'Intensidad' => '#FFA500',
-            'Fingers' => '#00BFFF',
-            'Black Edges' => '#FF0000',
-            'Microgrietas' => '#8A2BE2',
-            'Defectos' => '#32CD32',
-            'Soldadura' => '#FF69B4',
-            'Celdas dañadas' => '#FF0000',
-        ];
-
-        foreach ($filteredPredictions as $prediction) {
-            $box = $prediction['boundingBox'];
-            $left = (int) ($box['left'] * $image->width());
-            $top = (int) ($box['top'] * $image->height());
-            $width = (int) ($box['width'] * $image->width());
-            $height = (int) ($box['height'] * $image->height());
-
-            $tag = $prediction['tagName'] ?? '';
-            $color = $errorColors[$tag] ?? '#FFFFFF';
-            $label = sprintf('%s (%.1f%%)', $tag, ($prediction['probability'] ?? 0) * 100);
-
-            // Rectángulo con grosor mejorado para PDF
-            $rectangle = new Rectangle($width, $height);
-            $rectangle->setBackgroundColor('rgba(0,0,0,0.1)'); // Fondo semi-transparente mejorado
-            $rectangle->setBorder($color, 3); // Grosor aumentado para mejor visibilidad
-            $image->drawRectangle($left, $top, $rectangle);
-
-            // Texto con fondo para mejor legibilidad
-            try {
-                $font = new Font(resource_path('fonts/Inter_24pt-Regular.ttf'));
-                $font->setColor('#FFFFFF');
-                $font->setSize(20); // Tamaño aumentado
-
-                // Agregar fondo semi-transparente al texto
-                $textBg = new Rectangle(strlen($label) * 8, 20);
-                $textBg->setBackgroundColor($color);
-                $image->drawRectangle($left, max(0, $top - 25), $textBg);
-
-                $image->text($label, $left + 2, max(10, $top - 8), $font);
-            } catch (\Exception $e) {
-                // Fallback si no encuentra la fuente
-                $image->text($label, $left + 2, max(10, $top - 8), function($font) {
-                    $font->color('#FFFFFF');
-                    $font->size(14);
-                });
+            if (!$processedImage->ai_response_json) {
+                return null;
             }
+
+            $aiResponseJson = $processedImage->error_edits_json ?: $processedImage->ai_response_json;
+            $correctedPath = $processedImage->corrected_path;
+            $wasabi = Storage::disk('wasabi');
+
+            if (!$wasabi->exists($correctedPath)) {
+                Log::warning("Imagen procesada no encontrada en Wasabi: {$correctedPath}");
+                return null;
+            }
+
+            $imageData = $wasabi->get($correctedPath);
+            $manager = new ImageManager(new ImagickDriver());
+            $image = $manager->read($imageData);
+
+            // ✅ MISMA lógica de parsing que GenerateDownloadZipJob
+            $parsed = json_decode($aiResponseJson, true);
+            if (!$parsed) {
+                Log::warning("No se pudo parsear AI response JSON");
+                return null;
+            }
+
+            $predictions = $parsed['final'] ?? ($parsed['predictions'] ?? []);
+            $minProbability = $parsed['minProbability'] ?? 0.5;
+
+            // ✅ MISMOS colores que GenerateDownloadZipJob
+            $errorColors = [
+                'Intensidad' => '#FFA500',
+                'Fingers' => '#00BFFF',
+                'Black Edges' => '#333333',
+                'Microgrietas' => '#FF0000',
+            ];
+
+            foreach ($predictions as $prediction) {
+                if (isset($prediction['probability']) && $prediction['probability'] < $minProbability) {
+                    continue;
+                }
+
+                $box = $prediction['boundingBox'];
+                $left = (int) ($box['left'] * $image->width());
+                $top = (int) ($box['top'] * $image->height());
+                $width = (int) ($box['width'] * $image->width());
+                $height = (int) ($box['height'] * $image->height());
+
+                $tag = $prediction['tagName'] ?? '';
+                $color = $errorColors[$tag] ?? '#FFFFFF';
+                $label = sprintf('%s (%.1f%%)', $tag, $prediction['probability'] * 100);
+
+                // ✅ MISMO estilo de rectángulo que GenerateDownloadZipJob
+                $rectangle = new Rectangle($width, $height);
+                $rectangle->setBackgroundColor('transparent');
+                $rectangle->setBorder($color, 2); // ← 2, no 3
+                $image->drawRectangle($left, $top, $rectangle);
+
+                // ✅ MISMO estilo de texto que GenerateDownloadZipJob
+                if (file_exists(resource_path('fonts/Inter_24pt-Regular.ttf'))) {
+                    $font = new Font(resource_path('fonts/Inter_24pt-Regular.ttf'));
+                    $font->setColor('#FFFFFF');
+                    $font->setSize(14); // ← 14, no 16 ni 20
+                    $image->text($label, $left, $top - 12, $font); // ← Misma posición que ZIP
+                }
+                // ✅ QUITAR el fallback que causa problemas
+            }
+
+            // ✅ MISMO guardado temporal que GenerateDownloadZipJob
+            $tmpPath = storage_path('app/tmp/' . uniqid('analyzed_') . '.jpg');
+            if (!is_dir(dirname($tmpPath))) {
+                mkdir(dirname($tmpPath), 0755, true);
+            }
+
+            $image->toJpeg(90)->save($tmpPath);
+
+            // Leer contenido y eliminar archivo temporal
+            $content = file_get_contents($tmpPath);
+            unlink($tmpPath);
+
+            return $content;
+
+        } catch (\Exception $e) {
+            Log::warning("Error generando imagen analizada: " . $e->getMessage());
+            return null;
         }
     }
 
     /**
-     * ✅ Generar el PDF usando rutas de archivos en lugar de base64
+     * ✅ Generar el PDF usando rutas de archivos
      */
     private function generatePDF($project, $images, $analyzedImages, $tempDir, $partNumber = null, $totalParts = null): string
     {
+        Log::info("📄 Generando pdf...");
         $title = $partNumber ?
             "informe-electroluminiscencia-{$project->name}-parte-{$partNumber}-de-{$totalParts}" :
             "informe-electroluminiscencia-{$project->name}";
@@ -313,7 +312,7 @@ class GenerateReportJob implements ShouldQueue
         $pdf = Pdf::loadView('pdf.project_report_optimized', [
             'project' => $project,
             'images' => $images,
-            'analyzedImages' => $analyzedImages, // Rutas de archivos, no base64
+            'analyzedImages' => $analyzedImages, // Rutas de archivos con imágenes ya procesadas
             'partNumber' => $partNumber,
             'totalParts' => $totalParts,
         ]);
@@ -322,7 +321,7 @@ class GenerateReportJob implements ShouldQueue
             'isHtml5ParserEnabled' => true,
             'defaultFont' => 'Arial',
             'dpi' => 96,
-            'isRemoteEnabled' => false, // ✅ Desactivar para mejor seguridad
+            'isRemoteEnabled' => false,
         ]);
 
         $pdfPath = $tempDir . "/{$title}.pdf";
@@ -356,24 +355,106 @@ class GenerateReportJob implements ShouldQueue
     private function moveToFinalStorage(string $pdfPath, $project): string
     {
         $fileName = basename($pdfPath);
+        $fileSizeMB = filesize($pdfPath) / 1024 / 1024;
+
+        Log::info("📊 PDF generado: {$fileName} ({$fileSizeMB}MB)");
+
+        // Si el archivo es > 50MB, mover a Wasabi; si no, mantener local
+        if ($fileSizeMB > 500) {
+            return $this->moveToWasabi($pdfPath, $project, $fileName);
+        } else {
+            return $this->moveToLocal($pdfPath, $project, $fileName);
+        }
+    }
+
+    private function moveToWasabi(string $pdfPath, $project, string $fileName): string
+    {
+        try {
+            $wasabiPath = "reports/project_{$project->id}/{$fileName}";
+            $wasabi = Storage::disk('wasabi');
+
+            Log::info("📤 Moviendo PDF a Wasabi: {$fileName}");
+
+            $stream = fopen($pdfPath, 'r');
+            if (!$stream) {
+                throw new \Exception("No se pudo abrir el archivo PDF");
+            }
+
+            $success = $wasabi->writeStream($wasabiPath, $stream);
+            fclose($stream);
+
+            if (!$success) {
+                throw new \Exception("Falló la subida a Wasabi");
+            }
+
+            // Verificar integridad
+            $localSize = filesize($pdfPath);
+            $wasabiSize = $wasabi->size($wasabiPath);
+
+            if (abs($localSize - $wasabiSize) > 1024) {
+                throw new \Exception("Tamaños no coinciden: local={$localSize}, wasabi={$wasabiSize}");
+            }
+
+            unlink($pdfPath);
+
+            Log::info("✅ PDF movido exitosamente a Wasabi: {$wasabiPath}");
+            return $wasabiPath;
+
+        } catch (\Exception $e) {
+            Log::error("❌ Error moviendo PDF a Wasabi: " . $e->getMessage());
+            Log::info("📁 Fallback: Moviendo a storage local");
+            return $this->moveToLocal($pdfPath, $project, $fileName);
+        }
+    }
+
+    private function moveToLocal(string $pdfPath, $project, string $fileName): string
+    {
         $finalPath = "reports/project_{$project->id}/{$fileName}";
-
         Storage::disk('local')->put($finalPath, file_get_contents($pdfPath));
+        unlink($pdfPath);
 
+        Log::info("📁 PDF guardado en storage local: {$finalPath}");
         return $finalPath;
     }
 
     private function moveMultipleToFinalStorage(array $pdfPaths, $project): array
     {
         $finalPaths = [];
+        $totalSizeMB = 0;
 
+        // Calcular tamaño total
         foreach ($pdfPaths as $pdfPath) {
-            $finalPaths[] = $this->moveToFinalStorage($pdfPath, $project);
+            if (file_exists($pdfPath)) {
+                $totalSizeMB += filesize($pdfPath) / 1024 / 1024;
+            }
+        }
+
+        Log::info("📊 Total de PDFs: " . count($pdfPaths) . " archivos, {$totalSizeMB}MB");
+
+        // Procesar cada archivo
+        foreach ($pdfPaths as $pdfPath) {
+            if (!file_exists($pdfPath)) {
+                Log::warning("⚠️ Archivo no encontrado: {$pdfPath}");
+                continue;
+            }
+
+            $fileName = basename($pdfPath);
+            $fileSizeMB = filesize($pdfPath) / 1024 / 1024;
+
+            // Decidir storage basado en tamaño individual y total
+            $shouldUseWasabi = $fileSizeMB > 50 || $totalSizeMB > 100;
+
+            if ($shouldUseWasabi) {
+                $finalPaths[] = $this->moveToWasabi($pdfPath, $project, $fileName);
+            } else {
+                $finalPaths[] = $this->moveToLocal($pdfPath, $project, $fileName);
+            }
         }
 
         return $finalPaths;
     }
 
+    // ✅ Métodos de utilidad sin cambios
     private function loadProjectStructure($project): void
     {
         $rootFolders = $project->children()->whereNull('parent_id')

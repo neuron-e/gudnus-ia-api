@@ -349,18 +349,88 @@ class ProjectController extends Controller
 
         // ✅ Si es un solo archivo, descarga directa
         if (count($filePaths) === 1) {
+            return $this->downloadSingleReportFile($filePaths[0], $generation);
+        }
 
-            $filePath = $filePaths[0];
+        // ✅ Si son múltiples archivos, crear ZIP
+        return $this->downloadMultipleReportFiles($filePaths, $generation);
+    }
 
+    /**
+     * 🆕 NUEVO: Descargar un solo archivo de reporte (detecta automáticamente storage)
+     */
+    private function downloadSingleReportFile(string $filePath, ReportGeneration $generation)
+    {
+        // ✅ Detectar si es archivo de Wasabi por patrón de ruta
+        $isWasabiFile = str_starts_with($filePath, 'reports/') ||
+            str_starts_with($filePath, 'downloads/') ||
+            (!str_starts_with($filePath, '/') && !str_starts_with($filePath, storage_path()));
+
+        if ($isWasabiFile) {
+            // ✅ Archivo en Wasabi - descargar temporalmente
+            $tempPath = $generation->downloadFromWasabi($filePath);
+
+            if (!$tempPath) {
+                return response()->json(['error' => 'Archivo no encontrado en Wasabi'], 404);
+            }
+
+            return response()->download($tempPath)->deleteFileAfterSend(true);
+        } else {
+            // ✅ Archivo local
             if (!Storage::disk('local')->exists($filePath)) {
                 return response()->json(['error' => 'Archivo no encontrado en el sistema'], 404);
             }
 
             return Storage::disk('local')->download($filePath);
         }
+    }
 
-        // ✅ Si son múltiples archivos, crear ZIP
-        return $this->downloadMultipleFiles($filePaths, $generation);
+    /**
+     * 🆕 NUEVO: Descargar múltiples archivos de reporte como ZIP
+     */
+    private function downloadMultipleReportFiles(array $filePaths, ReportGeneration $generation)
+    {
+        $zipName = "informe-completo-{$generation->project->name}-" . now()->format('Y-m-d') . ".zip";
+        $zipPath = storage_path("app/tmp/{$zipName}");
+
+        // Asegurar que existe el directorio tmp
+        if (!is_dir(dirname($zipPath))) {
+            mkdir(dirname($zipPath), 0755, true);
+        }
+
+        $zip = new \ZipArchive();
+        if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+            return response()->json(['error' => 'No se pudo crear el archivo ZIP'], 500);
+        }
+
+        foreach ($filePaths as $filePath) {
+            $fileName = basename($filePath);
+
+            // ✅ Detectar tipo de storage por patrón
+            $isWasabiFile = str_starts_with($filePath, 'reports/') ||
+                str_starts_with($filePath, 'downloads/') ||
+                (!str_starts_with($filePath, '/') && !str_starts_with($filePath, storage_path()));
+
+            if ($isWasabiFile) {
+                // ✅ Archivo en Wasabi
+                $wasabi = Storage::disk('wasabi');
+                if ($wasabi->exists($filePath)) {
+                    $zip->addFromString($fileName, $wasabi->get($filePath));
+                }
+            } else {
+                // ✅ Archivo local
+                if (Storage::disk('local')->exists($filePath)) {
+                    $zip->addFile(
+                        Storage::disk('local')->path($filePath),
+                        $fileName
+                    );
+                }
+            }
+        }
+
+        $zip->close();
+
+        return response()->download($zipPath)->deleteFileAfterSend(true);
     }
 
     /**
@@ -386,23 +456,25 @@ class ProjectController extends Controller
                     'expires_at' => $generation->expires_at,
                     'is_expired' => $generation->hasExpired(),
                     'user_email' => $generation->user_email,
+                    'storage_type' => $generation->getStorageType(), // ✅ Método que detecta automáticamente
                 ];
 
                 if ($generation->isReady() && !$generation->hasExpired()) {
                     $filePaths = is_array($generation->file_path) ? $generation->file_path : [$generation->file_path];
 
-                    // ✅ Verificar que los archivos realmente existen
                     $existingFiles = [];
                     $totalSize = 0;
 
                     foreach ($filePaths as $path) {
-                        if (\Storage::disk('local')->exists($path)) {
-                            $size = \Storage::disk('local')->size($path);
+                        $size = $generation->getFileSize($path); // ✅ Método del modelo
+
+                        if ($size > 0) { // Solo incluir archivos que existen
                             $existingFiles[] = [
                                 'path' => $path,
                                 'name' => basename($path),
                                 'size' => $size,
                                 'size_mb' => round($size / 1024 / 1024, 2),
+                                'storage_type' => str_starts_with($path, 'reports/') ? 'wasabi' : 'local',
                                 'download_url' => route('reports.download', [
                                     'id' => $generation->id,
                                     'file' => basename($path)
@@ -418,7 +490,6 @@ class ProjectController extends Controller
                     $data['can_download'] = count($existingFiles) > 0;
                     $data['download_urls'] = array_column($existingFiles, 'download_url');
 
-                    // ✅ URL principal de descarga
                     if (count($existingFiles) > 0) {
                         $data['primary_download_url'] = $existingFiles[0]['download_url'];
                     }

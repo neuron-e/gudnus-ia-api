@@ -67,46 +67,22 @@ class GenerateDownloadZipJob implements ShouldQueue
 
             Log::info("📊 Procesando {$images->count()} imágenes tipo {$this->type}");
 
-            // ✅ Estrategia: Múltiples ZIPs si es necesario
-            $maxImagesPerZip = 500;
-            $imageChunks = $images->chunk($maxImagesPerZip);
-            $zipPaths = [];
-            $totalProcessed = 0;
+            // ✅ Generar ZIPs (sin cambios en la lógica de generación)
+            $localZipPaths = $this->generateZips($project, $images, $batch);
 
-            foreach ($imageChunks as $chunkIndex => $chunk) {
-                Log::info("📦 Procesando chunk " . ($chunkIndex + 1) . "/{$imageChunks->count()} ({$chunk->count()} imágenes)");
-
-                $zipPath = $this->generateZipForChunk(
-                    $project,
-                    $chunk,
-                    $this->type,
-                    $chunkIndex + 1,
-                    $imageChunks->count(),
-                    $batch,
-                    $totalProcessed
-                );
-
-                if ($zipPath) {
-                    $zipPaths[] = $zipPath;
-                    $totalProcessed += $chunk->count();
-
-                    // ✅ Actualizar progreso después de cada chunk
-                    $batch->update(['processed_images' => $totalProcessed]);
-                    $sumChunks = $chunkIndex + 1;
-                    Log::info("✅ Chunk {$sumChunks} completado. Total procesado: {$totalProcessed}/{$images->count()}");
-                }
-            }
+            // 🆕 NUEVA FUNCIONALIDAD: Mover archivos grandes a Wasabi
+            $finalPaths = $this->moveZipsToWasabiIfNeeded($localZipPaths, $project);
 
             // ✅ Actualizar batch con resultados finales
             $batch->update([
                 'status' => 'completed',
                 'completed_at' => now(),
-                'processed_images' => $totalProcessed,
-                'file_paths' => $zipPaths,
+                'processed_images' => $images->count(),
+                'file_paths' => $finalPaths, // ✅ Pueden ser rutas locales o de Wasabi
                 'expires_at' => now()->addDays(3)
             ]);
 
-            Log::info("✅ ZIP generación completada: " . count($zipPaths) . " archivos, {$totalProcessed} imágenes procesadas");
+            Log::info("✅ ZIP generación completada: " . count($finalPaths) . " archivos");
 
         } catch (\Throwable $e) {
             Log::error("❌ Error generando ZIP: " . $e->getMessage(), [
@@ -122,6 +98,161 @@ class GenerateDownloadZipJob implements ShouldQueue
             ]);
         }
     }
+
+    /**
+     * 🆕 NUEVO: Verificar espacio disponible antes de generar
+     */
+    private function checkAvailableSpace($estimatedSizeMB): void
+    {
+        $storagePath = storage_path('app');
+        $freeBytes = disk_free_space($storagePath);
+
+        if (!$freeBytes) {
+            Log::warning("⚠️ No se pudo verificar espacio disponible");
+            return;
+        }
+
+        $freeGB = $freeBytes / 1024 / 1024 / 1024;
+        $requiredGB = $estimatedSizeMB / 1024;
+
+        Log::info("💾 Espacio: {$freeGB}GB libres, {$requiredGB}GB requeridos");
+
+        if ($freeGB < ($requiredGB + 2)) { // +2GB de buffer
+            throw new \Exception("Espacio insuficiente: {$freeGB}GB libres, {$requiredGB}GB requeridos");
+        }
+
+        if ($freeGB < 5) {
+            Log::warning("⚠️ Espacio bajo: solo {$freeGB}GB libres");
+        }
+    }
+
+    private function generateZips($project, $images, $batch): array
+    {
+        // ✅ Estrategia: Múltiples ZIPs si es necesario
+        $maxImagesPerZip = 500;
+        $imageChunks = $images->chunk($maxImagesPerZip);
+        $zipPaths = [];
+        $totalProcessed = 0;
+
+        foreach ($imageChunks as $chunkIndex => $chunk) {
+            Log::info("📦 Procesando chunk " . ($chunkIndex + 1) . "/{$imageChunks->count()} ({$chunk->count()} imágenes)");
+
+            $zipPath = $this->generateZipForChunk(
+                $project,
+                $chunk,
+                $this->type,
+                $chunkIndex + 1,
+                $imageChunks->count(),
+                $batch,
+                $totalProcessed
+            );
+
+            if ($zipPath) {
+                $zipPaths[] = $zipPath;
+                $totalProcessed += $chunk->count();
+
+                // ✅ Actualizar progreso después de cada chunk
+                $batch->update(['processed_images' => $totalProcessed]);
+                $sumChunks = $chunkIndex + 1;
+                Log::info("✅ Chunk {$sumChunks} completado. Total procesado: {$totalProcessed}/{$images->count()}");
+            }
+        }
+
+        return $zipPaths;
+    }
+
+    /**
+     * 🆕 NUEVO: Mover ZIPs grandes a Wasabi para liberar espacio local
+     */
+    private function moveZipsToWasabiIfNeeded(array $localZipPaths, $project): array
+    {
+        $wasabi = Storage::disk('wasabi');
+        $finalPaths = [];
+        $totalSizeMB = 0;
+
+        // ✅ Calcular tamaño total de los ZIPs
+        foreach ($localZipPaths as $localPath) {
+            if (file_exists($localPath)) {
+                $totalSizeMB += filesize($localPath) / 1024 / 1024;
+            }
+        }
+
+        Log::info("📊 Tamaño total de ZIPs: " . round($totalSizeMB, 1) . "MB");
+
+        // ✅ Si el tamaño total es > 100MB, mover a Wasabi
+        $shouldMoveToWasabi = $totalSizeMB > 100;
+
+        if ($shouldMoveToWasabi) {
+            Log::info("📤 Moviendo ZIPs grandes a Wasabi para liberar espacio local...");
+
+            foreach ($localZipPaths as $localPath) {
+                if (!file_exists($localPath)) {
+                    Log::warning("⚠️ Archivo local no encontrado: {$localPath}");
+                    continue;
+                }
+
+                try {
+                    // ✅ Generar ruta en Wasabi
+                    $fileName = basename($localPath);
+                    $wasabiPath = "downloads/project_{$project->id}/{$fileName}";
+
+                    // ✅ Subir a Wasabi usando stream para archivos grandes
+                    $stream = fopen($localPath, 'r');
+                    if (!$stream) {
+                        throw new \Exception("No se pudo abrir el archivo local: {$localPath}");
+                    }
+
+                    $success = $wasabi->writeStream($wasabiPath, $stream);
+                    fclose($stream);
+
+                    if (!$success) {
+                        throw new \Exception("Falló la subida a Wasabi");
+                    }
+
+                    // ✅ Verificar que se subió correctamente
+                    if (!$wasabi->exists($wasabiPath)) {
+                        throw new \Exception("Archivo no encontrado en Wasabi después de la subida");
+                    }
+
+                    $localSizeMB = filesize($localPath) / 1024 / 1024;
+                    $wasabiSizeMB = $wasabi->size($wasabiPath) / 1024 / 1024;
+
+                    if (abs($localSizeMB - $wasabiSizeMB) > 1) { // Tolerancia de 1MB
+                        throw new \Exception("Tamaños no coinciden: local={$localSizeMB}MB, wasabi={$wasabiSizeMB}MB");
+                    }
+
+                    // ✅ Eliminar archivo local después de verificar
+                    unlink($localPath);
+
+                    // ✅ Usar ruta de Wasabi
+                    $finalPaths[] = $wasabiPath;
+
+                    Log::info("✅ ZIP movido a Wasabi: {$fileName} (" . round($localSizeMB, 1) . "MB)");
+
+                } catch (\Exception $e) {
+                    Log::error("❌ Error moviendo ZIP a Wasabi: " . $e->getMessage());
+
+                    // ✅ En caso de error, mantener archivo local
+                    $finalPaths[] = $localPath;
+
+                    // ✅ Limpiar archivo parcial en Wasabi si existe
+                    if (isset($wasabiPath) && $wasabi->exists($wasabiPath)) {
+                        $wasabi->delete($wasabiPath);
+                    }
+                }
+            }
+            $countPaths = count($localZipPaths);
+            $movedCount = collect($finalPaths)->filter(fn($path) => str_starts_with($path, 'downloads/'))->count();
+            Log::info("📤 Resumen: {$movedCount}/{$countPaths} ZIPs movidos a Wasabi");
+
+        } else {
+            Log::info("📁 ZIPs pequeños (<100MB), manteniéndolos en storage local");
+            $finalPaths = $localZipPaths;
+        }
+
+        return $finalPaths;
+    }
+
 
     /**
      * ✅ Obtener imágenes específicas según el tipo
