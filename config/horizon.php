@@ -86,10 +86,10 @@ return [
     'waits' => [
         'redis:default' => 60,
         'redis:images' => 60,
-        'redis:analysis' => 120,     // ✅ Más tiempo para análisis IA
-        'redis:zip-analysis' => 300, // ✅ NUEVA: Análisis de ZIP grandes
-        'redis:downloads' => 600,    // ✅ 10 minutos para descargas
-        'redis:reports' => 1200,     // ✅ 20 minutos para reportes
+        'redis:analysis' => 120,
+        'redis:zip-analysis' => 300,
+        'redis:downloads' => 1200,   // ✅ 20 minutos (era 10) - para proyectos grandes
+        'redis:reports' => 1200,
     ],
 
     /*
@@ -270,13 +270,13 @@ return [
                 'balance' => 'auto',
                 'autoScalingStrategy' => 'size',
                 'minProcesses' => 1,
-                'maxProcesses' => 3, // Máximo 3 descargas simultáneas
-                'tries' => 2,
-                'timeout' => 7200, // 2 horas timeout
-                'memory' => 1024, // Más memoria para ZIPs grandes
+                'maxProcesses' => 2,     // ✅ Máximo 2 (era 3) - proyectos grandes necesitan más recursos
+                'tries' => 1,            // ✅ Solo 1 intento (era 2) - coincide con el job
+                'timeout' => 14400,      // ✅ 4 horas (era 2) - coincide con el job
+                'memory' => 2048,        // ✅ 2GB (era 1GB) - para proyectos masivos
                 'sleep' => 5,
-                'maxJobs' => 10,
-                'rest' => 300, // 5 minutos de descanso cada 10 jobs
+                'maxJobs' => 5,          // ✅ Menos jobs antes de restart (era 10)
+                'rest' => 600,           // ✅ 10 minutos descanso (era 5) - liberar memoria
             ],
 
             // ✅ NUEVA: Cola para generación de reportes

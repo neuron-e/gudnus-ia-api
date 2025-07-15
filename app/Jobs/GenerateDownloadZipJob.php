@@ -23,17 +23,38 @@ class GenerateDownloadZipJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $timeout = 7200; // 2 horas
-    public $tries = 2;
+    // ✅ CONFIGURACIÓN OPTIMIZADA PARA PROYECTOS GRANDES
+    public $timeout = 14400; // 4 horas (era 2 horas)
+    public $tries = 1;       // Solo 1 intento (era 2) - mejor control manual
+    public $maxExceptions = 1;
+
+    // ✅ NUEVO: Configurar memoria explícitamente
+    public $memoryLimit = '2G';
+
+    public function backoff(): array
+    {
+        return [300]; // 5 minutos si hay retry
+    }
 
     public function __construct(
         public int $projectId,
-        public string $type, // original, processed, analyzed, all
+        public string $type,
         public int $batchId
-    ) {}
+    ) {
+        // ✅ Configurar memoria al instanciar
+        ini_set('memory_limit', $this->memoryLimit);
+    }
 
     public function handle()
     {
+        Log::info("🚀 GenerateDownloadZipJob iniciado", [
+            'batch_id' => $this->batchId,
+            'project_id' => $this->projectId,
+            'type' => $this->type,
+            'memory_limit' => ini_get('memory_limit'),
+            'timeout' => $this->timeout
+        ]);
+
         $batch = DownloadBatch::find($this->batchId);
         if (!$batch) {
             Log::error("DownloadBatch {$this->batchId} no encontrado");
@@ -46,8 +67,6 @@ class GenerateDownloadZipJob implements ShouldQueue
             return;
         }
 
-        Log::info("🚀 Iniciando generación ZIP {$this->type} para proyecto {$this->projectId}");
-
         try {
             $batch->update([
                 'status' => 'processing',
@@ -55,30 +74,27 @@ class GenerateDownloadZipJob implements ShouldQueue
                 'processed_images' => 0
             ]);
 
-            // ✅ Obtener imágenes según el tipo específico
+            // ✅ NUEVO: Verificar espacio ANTES de empezar
+            $this->checkAvailableSpace();
+
             $images = $this->getImagesForType($this->projectId, $this->type);
 
             if ($images->isEmpty()) {
                 throw new \Exception("No hay imágenes del tipo '{$this->type}' para exportar");
             }
 
-            // ✅ Actualizar total real
             $batch->update(['total_images' => $images->count()]);
-
             Log::info("📊 Procesando {$images->count()} imágenes tipo {$this->type}");
 
-            // ✅ Generar ZIPs (sin cambios en la lógica de generación)
+            // ✅ CLAVE: Chunks más pequeños para proyectos grandes
             $localZipPaths = $this->generateZips($project, $images, $batch);
-
-            // 🆕 NUEVA FUNCIONALIDAD: Mover archivos grandes a Wasabi
             $finalPaths = $this->moveZipsToWasabiIfNeeded($localZipPaths, $project);
 
-            // ✅ Actualizar batch con resultados finales
             $batch->update([
                 'status' => 'completed',
                 'completed_at' => now(),
                 'processed_images' => $images->count(),
-                'file_paths' => $finalPaths, // ✅ Pueden ser rutas locales o de Wasabi
+                'file_paths' => $finalPaths,
                 'expires_at' => now()->addDays(3)
             ]);
 
@@ -89,6 +105,7 @@ class GenerateDownloadZipJob implements ShouldQueue
                 'batch_id' => $this->batchId,
                 'project_id' => $this->projectId,
                 'type' => $this->type,
+                'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB',
                 'trace' => $e->getTraceAsString()
             ]);
 
@@ -102,7 +119,7 @@ class GenerateDownloadZipJob implements ShouldQueue
     /**
      * 🆕 NUEVO: Verificar espacio disponible antes de generar
      */
-    private function checkAvailableSpace($estimatedSizeMB): void
+    private function checkAvailableSpace(): void
     {
         $storagePath = storage_path('app');
         $freeBytes = disk_free_space($storagePath);
@@ -113,28 +130,44 @@ class GenerateDownloadZipJob implements ShouldQueue
         }
 
         $freeGB = $freeBytes / 1024 / 1024 / 1024;
-        $requiredGB = $estimatedSizeMB / 1024;
+        Log::info("💾 Espacio libre: {$freeGB}GB");
 
-        Log::info("💾 Espacio: {$freeGB}GB libres, {$requiredGB}GB requeridos");
-
-        if ($freeGB < ($requiredGB + 2)) { // +2GB de buffer
-            throw new \Exception("Espacio insuficiente: {$freeGB}GB libres, {$requiredGB}GB requeridos");
+        // ✅ Para 2096 imágenes necesitamos al menos 8GB libres
+        if ($freeGB < 8) {
+            throw new \Exception("Espacio insuficiente: {$freeGB}GB libres. Se requieren al menos 8GB para este proyecto.");
         }
 
-        if ($freeGB < 5) {
-            Log::warning("⚠️ Espacio bajo: solo {$freeGB}GB libres");
+        if ($freeGB < 12) {
+            Log::warning("⚠️ Espacio limitado: {$freeGB}GB libres");
         }
     }
 
     private function generateZips($project, $images, $batch): array
     {
-        // ✅ Estrategia: Múltiples ZIPs si es necesario
-        $maxImagesPerZip = 500;
+        $imageCount = $images->count();
+
+        // ✅ Chunks dinámicos según el tamaño del proyecto
+        $maxImagesPerZip = match(true) {
+            $imageCount > 2000 => 200,  // ✅ Proyectos masivos: chunks pequeños
+            $imageCount > 1000 => 300,  // ✅ Proyectos grandes: chunks medianos
+            $imageCount > 500 => 400,   // ✅ Proyectos normales
+            default => 500              // ✅ Proyectos pequeños
+        };
+
+        Log::info("📦 Usando chunks de {$maxImagesPerZip} imágenes para proyecto de {$imageCount} imágenes");
+
         $imageChunks = $images->chunk($maxImagesPerZip);
         $zipPaths = [];
         $totalProcessed = 0;
 
         foreach ($imageChunks as $chunkIndex => $chunk) {
+            // ✅ CRÍTICO: Liberar memoria entre chunks
+            if ($chunkIndex > 0) {
+                gc_collect_cycles();
+                $memoryMB = memory_get_usage(true) / 1024 / 1024;
+                Log::info("🧹 Memoria liberada. Uso actual: {$memoryMB}MB");
+            }
+
             Log::info("📦 Procesando chunk " . ($chunkIndex + 1) . "/{$imageChunks->count()} ({$chunk->count()} imágenes)");
 
             $zipPath = $this->generateZipForChunk(
@@ -150,11 +183,9 @@ class GenerateDownloadZipJob implements ShouldQueue
             if ($zipPath) {
                 $zipPaths[] = $zipPath;
                 $totalProcessed += $chunk->count();
-
-                // ✅ Actualizar progreso después de cada chunk
                 $batch->update(['processed_images' => $totalProcessed]);
-                $sumChunks = $chunkIndex + 1;
-                Log::info("✅ Chunk {$sumChunks} completado. Total procesado: {$totalProcessed}/{$images->count()}");
+
+                Log::info("✅ Chunk " . ($chunkIndex + 1) . " completado. Total: {$totalProcessed}/{$imageCount}");
             }
         }
 
@@ -539,7 +570,12 @@ class GenerateDownloadZipJob implements ShouldQueue
 
     public function failed(\Throwable $exception): void
     {
-        Log::error("❌ GenerateDownloadZipJob FAILED para batch {$this->batchId}: " . $exception->getMessage());
+        Log::error("❌ GenerateDownloadZipJob FAILED para batch {$this->batchId}", [
+            'error' => $exception->getMessage(),
+            'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB',
+            'timeout' => $this->timeout,
+            'attempts' => $this->attempts()
+        ]);
 
         $batch = DownloadBatch::find($this->batchId);
         if ($batch) {
