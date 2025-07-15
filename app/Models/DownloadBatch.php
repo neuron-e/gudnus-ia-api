@@ -77,31 +77,58 @@ class DownloadBatch extends Model
     {
         if (!$this->file_paths) return false;
 
+        $wasabi = \Illuminate\Support\Facades\Storage::disk('wasabi');
+
         foreach ($this->file_paths as $path) {
-            if (!file_exists($path)) {
-                return false;
+            // ✅ Verificar archivos de Wasabi (empiezan con "downloads/")
+            if (str_starts_with($path, 'downloads/')) {
+                if (!$wasabi->exists($path)) {
+                    return false;
+                }
+            } // ✅ Verificar archivos locales
+            else {
+                if (!file_exists($path)) {
+                    return false;
+                }
             }
         }
-
-        return true;
     }
 
-    /**
+
+
+        /**
      * ✅ Obtener tamaño total de archivos
      */
     public function getTotalSize(): int
     {
         if (!$this->file_paths) return 0;
 
+        $wasabi = \Illuminate\Support\Facades\Storage::disk('wasabi');
         $totalSize = 0;
+
         foreach ($this->file_paths as $path) {
-            if (file_exists($path)) {
-                $totalSize += filesize($path);
+            try {
+                // ✅ Archivos en Wasabi
+                if (str_starts_with($path, 'downloads/')) {
+                    if ($wasabi->exists($path)) {
+                        $totalSize += $wasabi->size($path);
+                    }
+                }
+                // ✅ Archivos locales
+                else {
+                    if (file_exists($path)) {
+                        $totalSize += filesize($path);
+                    }
+                }
+            } catch (\Exception $e) {
+                // Log pero continuar con otros archivos
+                \Illuminate\Support\Facades\Log::warning("Error obteniendo tamaño de archivo: {$path} - " . $e->getMessage());
             }
         }
 
         return $totalSize;
     }
+
 
     /**
      * ✅ Formatear tamaño total
@@ -136,12 +163,98 @@ class DownloadBatch extends Model
     {
         if (!$this->file_paths) return;
 
+        $wasabi = \Illuminate\Support\Facades\Storage::disk('wasabi');
+
         foreach ($this->file_paths as $path) {
-            if (file_exists($path)) {
-                @unlink($path);
+            try {
+                // ✅ Eliminar archivos de Wasabi
+                if (str_starts_with($path, 'downloads/')) {
+                    if ($wasabi->exists($path)) {
+                        $wasabi->delete($path);
+                        \Illuminate\Support\Facades\Log::info("🗑️ Archivo Wasabi eliminado: {$path}");
+                    }
+                }
+                // ✅ Eliminar archivos locales
+                else {
+                    if (file_exists($path)) {
+                        @unlink($path);
+                        \Illuminate\Support\Facades\Log::info("🗑️ Archivo local eliminado: {$path}");
+                    }
+                }
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::error("Error eliminando archivo: {$path} - " . $e->getMessage());
             }
         }
     }
+
+    public function getFilesInfo(): array
+    {
+        if (!$this->file_paths) return [];
+
+        $wasabi = \Illuminate\Support\Facades\Storage::disk('wasabi');
+        $filesInfo = [];
+
+        foreach ($this->file_paths as $path) {
+            $info = [
+                'path' => $path,
+                'filename' => basename($path),
+                'exists' => false,
+                'size' => 0,
+                'size_formatted' => '0 B',
+                'storage_type' => str_starts_with($path, 'downloads/') ? 'wasabi' : 'local'
+            ];
+
+            try {
+                if (str_starts_with($path, 'downloads/')) {
+                    // Archivo Wasabi
+                    if ($wasabi->exists($path)) {
+                        $info['exists'] = true;
+                        $info['size'] = $wasabi->size($path);
+                        $info['size_formatted'] = $this->formatFileSize($info['size']);
+                    }
+                } else {
+                    // Archivo local
+                    if (file_exists($path)) {
+                        $info['exists'] = true;
+                        $info['size'] = filesize($path);
+                        $info['size_formatted'] = $this->formatFileSize($info['size']);
+                    }
+                }
+            } catch (\Exception $e) {
+                $info['error'] = $e->getMessage();
+            }
+
+            $filesInfo[] = $info;
+        }
+
+        return $filesInfo;
+    }
+
+    /**
+     * ✅ HELPER: Formatear tamaño de archivo
+     */
+    private function formatFileSize($bytes): string
+    {
+        $units = ['B', 'KB', 'MB', 'GB'];
+        $bytes = max($bytes, 0);
+        $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+        $pow = min($pow, count($units) - 1);
+        $bytes /= pow(1024, $pow);
+        return round($bytes, 2) . ' ' . $units[$pow];
+    }
+
+    /**
+     * ✅ NUEVO: Verificar si archivos están en Wasabi
+     */
+    public function isStoredInWasabi(): bool
+    {
+        if (!$this->file_paths) return false;
+
+        return collect($this->file_paths)->every(function($path) {
+            return str_starts_with($path, 'downloads/');
+        });
+    }
+
 
     /**
      * ✅ Scopes útiles
