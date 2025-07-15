@@ -1,18 +1,28 @@
 <?php
 
-use App\Http\Controllers\Api\AnalysisBatchController;
-use App\Http\Controllers\Api\DownloadController;
-use App\Http\Controllers\Api\FolderController;
-use App\Http\Controllers\Api\LargeZipController;
-use App\Http\Controllers\Api\ProjectController;
-use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Route;
 
-Route::get('/user', function (Request $request) {
-    return $request->user();
-})->middleware('auth:sanctum');
+use App\Models\User;
+
+use App\Http\Controllers\Api\{
+    AnalysisBatchController,
+    DownloadController,
+    FolderController,
+    ImageController,
+    ImageProxyController,
+    LargeZipController,
+    ProcessedImageController,
+    ProjectController,
+    UnifiedBatchController,
+    ImageAnalysisResultController
+};
+
+// ===========================
+// 🔐 Autenticación básica
+// ===========================
+Route::middleware('auth:sanctum')->get('/user', fn (Request $request) => $request->user());
 
 Route::post('/login', function (Request $request) {
     $user = User::where('email', $request->email)->first();
@@ -21,123 +31,141 @@ Route::post('/login', function (Request $request) {
         return response()->json(['message' => 'Credenciales incorrectas'], 401);
     }
 
-    $token = $user->createToken('auth_token')->plainTextToken;
-
     return response()->json([
-        'access_token' => $token,
+        'access_token' => $user->createToken('auth_token')->plainTextToken,
         'token_type' => 'Bearer',
         'user' => $user,
     ]);
 });
 
-Route::get('/wasabi-image', [\App\Http\Controllers\Api\ImageProxyController::class, 'show']);
-
-
-// Logout
 Route::middleware('auth:sanctum')->post('/logout', function (Request $request) {
     $request->user()->currentAccessToken()->delete();
     return response()->json(['message' => 'Sesión cerrada']);
 });
-// Cancelar generación
-Route::delete('/reports/{generation}/cancel', [ProjectController::class, 'cancelReportGeneration']);
 
-Route::delete('/reports/{generationId}', [ProjectController::class, 'deleteReport']);
-
-Route::apiResource('projects', \App\Http\Controllers\Api\ProjectController::class)->parameters(['' => 'project']);
+// ===========================
+// 📦 Proyecto y estructura
+// ===========================
+Route::apiResource('projects', ProjectController::class)->parameters(['' => 'project']);
 
 Route::prefix('projects')->group(function () {
-    Route::post('/{project}/generate-basic-structure', [\App\Http\Controllers\Api\FolderController::class, 'generateBasicStructure']);
-    Route::get('{project}/check-structure', [FolderController::class, 'checkProjectStructure']);
-/*    Route::get('/{project}/generate-report', [\App\Http\Controllers\Api\ProjectController::class, 'generateReport']);*/
+    Route::post('/{project}/generate-basic-structure', [FolderController::class, 'generateBasicStructure']);
+    Route::get('/{project}/check-structure', [FolderController::class, 'checkProjectStructure']);
+
     Route::post('/{project}/reports/generate', [ProjectController::class, 'generateReport']);
-    // Estado de generación
     Route::get('/{project}/reports/status/{generation?}', [ProjectController::class, 'getReportStatus']);
-
-    // Listar reportes del proyecto
     Route::get('/{project}/reports', [ProjectController::class, 'listReports']);
-
-    // ✅ Verificar estado general de reportes del proyecto
     Route::get('/{project}/reports/check', [ProjectController::class, 'checkProjectReports']);
 
-    Route::get('/health/reports', [\App\Http\Controllers\HealthController::class, 'reports']);
+    Route::get('/health/reports', [App\Http\Controllers\HealthController::class, 'reports']);
 
-    Route::get('/{project}/folders', [\App\Http\Controllers\Api\FolderController::class, 'index']);
-    Route::post('/{project}/folders', [\App\Http\Controllers\Api\FolderController::class, 'store']);
-    Route::put('/{project}/folders/{folder}', [\App\Http\Controllers\Api\FolderController::class, 'update']);
-    Route::post('/{project}/structure', [\App\Http\Controllers\Api\FolderController::class, 'storeByExcel']);
-    Route::delete('/{project}/folders/{folder}/empty', [\App\Http\Controllers\Api\FolderController::class, 'empty']);
-    Route::delete('/{project}/folders/{folder}', [\App\Http\Controllers\Api\FolderController::class, 'destroy']);
+    // Folders
+    Route::get('/{project}/folders', [FolderController::class, 'index']);
+    Route::post('/{project}/folders', [FolderController::class, 'store']);
+    Route::put('/{project}/folders/{folder}', [FolderController::class, 'update']);
+    Route::delete('/{project}/folders/{folder}/empty', [FolderController::class, 'empty']);
+    Route::delete('/{project}/folders/{folder}', [FolderController::class, 'destroy']);
+    Route::post('/{project}/folders/bulk-empty', [FolderController::class, 'emptyMultiple']);
+    Route::post('/{project}/folders/bulk-delete', [FolderController::class, 'deleteMultiple']);
+    Route::post('/{project}/structure', [FolderController::class, 'storeByExcel']);
 
-    Route::post('/{project}/folders/bulk-empty', [\App\Http\Controllers\Api\FolderController::class, 'emptyMultiple']);
-    Route::post('/{project}/folders/bulk-delete', [\App\Http\Controllers\Api\FolderController::class, 'deleteMultiple']);
+    // Images
+    Route::post('/{project}/images/bulk-upload', [ImageController::class, 'uploadZipByModule']);
+    Route::post('/{project}/images/zip-with-mapping', [ImageController::class, 'uploadWithMapping']);
+    Route::get('/{project}/download-images', [ImageController::class, 'downloadImages']);
 
-    Route::post('/{project}/images/bulk-upload', [App\Http\Controllers\Api\ImageController::class, 'uploadZipByModule']);
-    Route::post('/{project}/images/zip-with-mapping', [App\Http\Controllers\Api\ImageController::class, 'uploadWithMapping']);
-    Route::get('/{project}/download-images', [App\Http\Controllers\Api\ImageController::class, 'downloadImages']);
+    // Status
+    Route::get('/{project}/processing-status', [ProjectController::class, 'getProcessingStatus']);
 
-    Route::get('/{project}/processing-status', [\App\Http\Controllers\Api\ProjectController::class, 'getProcessingStatus']);
-
-
-    // Upload ZIP grande
+    // ZIPs
     Route::post('/{project}/upload-large-zip', [LargeZipController::class, 'uploadLargeZip']);
-
-    // ✅ Rutas de descarga masiva
     Route::post('/{project}/downloads/start', [DownloadController::class, 'startMassiveDownload']);
     Route::get('/{project}/downloads', [DownloadController::class, 'listProjectDownloads']);
-
-    // Limpiar análisis antiguos (opcional, para mantenimiento)
-    //Route::delete('zip-analysis/cleanup', [LargeZipController::class, 'cleanupOldAnalyses']);
-
 });
 
-Route::get('/downloads/{batchId}/{filename}', [DownloadController::class, 'downloadFile'])
-    ->where('filename', '.*') // para que funcione con rutas anidadas
-    ->name('downloads.file');
+// ===========================
+// 🔧 Unified Batches
+// ===========================
+Route::prefix('projects/{project}')->group(function () {
+    // 📋 GESTIÓN DE BATCHES UNIFICADOS
+    Route::get('/unified-batches', [UnifiedBatchController::class, 'index'])
+        ->name('unified-batches.index');
 
-// Estado del análisis
-Route::get('zip-analysis/{analysisId}/status', [LargeZipController::class, 'getAnalysisStatus']);
+    Route::post('/unified-batches', [UnifiedBatchController::class, 'store'])
+        ->name('unified-batches.store');
 
-// Procesar ZIP analizado
-Route::post('zip-analysis/{analysisId}/process', [LargeZipController::class, 'processAnalyzedZip']);
+    Route::get('/unified-batches/{batchId}', [UnifiedBatchController::class, 'show'])
+        ->name('unified-batches.show');
 
-Route::get('/reports/{id}/download/{file?}', [ProjectController::class, 'downloadReport'])
-    ->name('reports.download');
+    Route::put('/unified-batches/{batchId}/start', [UnifiedBatchController::class, 'start'])
+        ->name('unified-batches.start');
 
-// Limpiar reportes expirados (admin)
-Route::post('/reports/cleanup', [ProjectController::class, 'cleanupExpiredReports']);
+    Route::put('/unified-batches/{batchId}/pause', [UnifiedBatchController::class, 'pause'])
+        ->name('unified-batches.pause');
 
-Route::prefix('folders')->group(function () {
-    Route::get('/{folder}/images', [\App\Http\Controllers\Api\ImageController::class, 'index']);
-    Route::post('/{folder}/images/upload', [\App\Http\Controllers\Api\ImageController::class, 'upload']);
+    Route::put('/unified-batches/{batchId}/resume', [UnifiedBatchController::class, 'resume'])
+        ->name('unified-batches.resume');
+
+    Route::delete('/unified-batches/{batchId}', [UnifiedBatchController::class, 'cancel'])
+        ->name('unified-batches.cancel');
+
+    // 🔄 COMPATIBILIDAD TEMPORAL con rutas legacy (MANTENER durante transición)
+    Route::get('/batches', [UnifiedBatchController::class, 'legacyGetProjectBatches'])
+        ->name('batches.legacy.index');
+
+    Route::post('/retry-pending-images', [UnifiedBatchController::class, 'legacyRetryPendingImages'])
+        ->name('batches.legacy.retry-images');
+
+    Route::post('/retry-pending-analysis', [UnifiedBatchController::class, 'legacyRetryPendingAnalysis'])
+        ->name('batches.legacy.retry-analysis');
+
+    Route::post('/force-clean', [UnifiedBatchController::class, 'legacyForceCleanProject'])
+        ->name('batches.legacy.force-clean');
 });
 
-Route::get('/downloads/{batchId}/status', [\App\Http\Controllers\Api\DownloadController::class, 'getDownloadStatus']);
+Route::get('/unified-batches/diagnostic', [UnifiedBatchController::class, 'systemDiagnostic']);
 
-
-Route::get('/images/{image}/processed', [\App\Http\Controllers\Api\ProcessedImageController::class, 'show']);
-Route::get('/images/{image}/analysis', [\App\Http\Controllers\Api\ImageAnalysisResultController::class, 'show']);
-Route::post('/images/{image}/process', [\App\Http\Controllers\Api\ProcessedImageController::class, 'process']);
-Route::post('/images/{project}/bulk-process', [\App\Http\Controllers\Api\ProcessedImageController::class, 'processBulk']);
-
-Route::get('/images/{image}/base64', [App\Http\Controllers\Api\ImageController::class, 'base64']);
-Route::post('/images/{image}/manual-crop', [App\Http\Controllers\Api\ImageController::class, 'manualCrop']);
-Route::post('/images/{image}/manual-errors', [App\Http\Controllers\Api\ImageController::class, 'saveManualErrors']);
-Route::post('/images/{image}/status-processed', [App\Http\Controllers\Api\ImageController::class, 'imageProcessedStatus']);
-Route::post('/images/{image}/status-analysis', [App\Http\Controllers\Api\ImageController::class, 'imageAnalysisStatus']);
-
+// ===========================
+// 📦 Analysis & Image Status
+// ===========================
 Route::get('/projects/{project}/processing-status', [AnalysisBatchController::class, 'processingStatus']);
 Route::get('/projects/{project}/processing-status-image', [AnalysisBatchController::class, 'processingStatusImage']);
 
-// ✅ Nuevas rutas para manejo de batches colgados
-Route::get('/projects/{project}/batches', [AnalysisBatchController::class, 'getProjectBatches']);
-Route::post('/projects/{project}/retry-pending-images', [AnalysisBatchController::class, 'retryPendingImages']);
-Route::post('/projects/{project}/retry-pending-analysis', [AnalysisBatchController::class, 'retryPendingAnalysis']);
-Route::post('/projects/{project}/force-clean', [AnalysisBatchController::class, 'forceCleanProject']); // ✅ NUEVO
-
-// Rutas para batches específicos - con parámetro de tipo
 Route::get('/batches/{batchId}/details/{type}', [AnalysisBatchController::class, 'getBatchDetails']);
 Route::put('/batches/{batchId}/force-complete/{type}', [AnalysisBatchController::class, 'forceCompleteBatch']);
 Route::put('/batches/{batchId}/cancel/{type}', [AnalysisBatchController::class, 'cancelBatch']);
-
-// Limpieza general
 Route::post('/batches/cleanup', [AnalysisBatchController::class, 'cleanupOldBatches']);
+
+// ===========================
+// 📷 Imágenes y análisis
+// ===========================
+Route::prefix('folders')->group(function () {
+    Route::get('/{folder}/images', [ImageController::class, 'index']);
+    Route::post('/{folder}/images/upload', [ImageController::class, 'upload']);
+});
+
+Route::get('/images/{image}/processed', [ProcessedImageController::class, 'show']);
+Route::get('/images/{image}/analysis', [ImageAnalysisResultController::class, 'show']);
+Route::post('/images/{image}/process', [ProcessedImageController::class, 'process']);
+Route::post('/images/{project}/bulk-process', [ProcessedImageController::class, 'processBulk']);
+
+Route::get('/images/{image}/base64', [ImageController::class, 'base64']);
+Route::post('/images/{image}/manual-crop', [ImageController::class, 'manualCrop']);
+Route::post('/images/{image}/manual-errors', [ImageController::class, 'saveManualErrors']);
+Route::post('/images/{image}/status-processed', [ImageController::class, 'imageProcessedStatus']);
+Route::post('/images/{image}/status-analysis', [ImageController::class, 'imageAnalysisStatus']);
+
+// ===========================
+// 🧠 ZIP Analysis (legacy)
+// ===========================
+Route::get('/wasabi-image', [ImageProxyController::class, 'show']);
+Route::get('/downloads/{batchId}/status', [DownloadController::class, 'getDownloadStatus']);
+Route::get('/downloads/{batchId}/{filename}', [DownloadController::class, 'downloadFile'])->where('filename', '.*');
+
+Route::delete('/reports/{generation}/cancel', [ProjectController::class, 'cancelReportGeneration']);
+Route::delete('/reports/{generationId}', [ProjectController::class, 'deleteReport']);
+Route::get('/reports/{id}/download/{file?}', [ProjectController::class, 'downloadReport']);
+Route::post('/reports/cleanup', [ProjectController::class, 'cleanupExpiredReports']);
+
+Route::get('zip-analysis/{analysisId}/status', [LargeZipController::class, 'getAnalysisStatus']);
+Route::post('zip-analysis/{analysisId}/process', [LargeZipController::class, 'processAnalyzedZip']);
