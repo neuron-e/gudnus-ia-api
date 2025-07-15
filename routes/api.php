@@ -160,7 +160,9 @@ Route::post('/images/{image}/status-analysis', [ImageController::class, 'imageAn
 // ===========================
 Route::get('/wasabi-image', [ImageProxyController::class, 'show']);
 Route::get('/downloads/{batchId}/status', [DownloadController::class, 'getDownloadStatus']);
-Route::get('/downloads/{batchId}/{filename}', [DownloadController::class, 'downloadFile'])->where('filename', '.*');
+Route::get('/downloads/{batchId}/{filename}', [DownloadController::class, 'downloadFile'])
+    ->where('filename', '.*')
+    ->name('downloads.file');
 
 Route::delete('/reports/{generation}/cancel', [ProjectController::class, 'cancelReportGeneration']);
 Route::delete('/reports/{generationId}', [ProjectController::class, 'deleteReport']);
