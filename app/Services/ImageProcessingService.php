@@ -247,22 +247,32 @@ class ImageProcessingService
         @unlink($outputTemp);
 
         // ✅ Parsear JSON output
-        Log::debug("📊 Parseando output JSON del script...");
-        $jsonData = json_decode($stdout, true);
-        if (json_last_error() !== JSON_ERROR_NONE || !$jsonData) {
-            $msg = "Error parseando JSON: " . json_last_error_msg();
+        // ✅ Parsear JSON output de YOLO de forma robusta
+        Log::debug("📊 Parseando output JSON del script YOLO...");
+        $jsonData = $this->extractJsonFromOutput($stdout);
+        if (!$jsonData) {
+            $msg = "Error parseando JSON de YOLO: No se encontró JSON válido";
             Log::error("❌ " . $msg, [
                 'stdout' => $stdout,
-                'json_error' => json_last_error_msg()
+                'stdout_length' => strlen($stdout)
             ]);
             $image->update(['status' => 'error']);
             $this->handleBatchError($batchId, $msg);
             return $image;
         }
 
+        // ✅ Verificar que YOLO fue exitoso
+        if (!($jsonData['success'] ?? false)) {
+            $msg = "YOLO reportó fallo: " . ($jsonData['error'] ?? 'Error desconocido');
+            Log::error("❌ " . $msg);
+            $image->update(['status' => 'error']);
+            $this->handleBatchError($batchId, $msg);
+            return $image;
+        }
+
         try {
-            // ✅ Guardar datos en base de datos
-            Log::debug("💾 Guardando datos en base de datos...");
+            // ✅ Guardar datos en base de datos con métricas de YOLO
+            Log::debug("💾 Guardando datos YOLO en base de datos...");
 
             $processed = $image->processedImage ?? new ProcessedImage();
             $processed->corrected_path = $wasabiProcessedPath;
@@ -270,20 +280,28 @@ class ImageProcessingService
 
             $analysis = $image->analysisResult ?? new ImageAnalysisResult();
             $analysis->fill([
-                'rows' => $jsonData['filas'] ?? null,
-                'columns' => $jsonData['columnas'] ?? null,
+                'rows' => $jsonData['filas'] ?? 24,
+                'columns' => $jsonData['columnas'] ?? 6,
                 'integrity_score' => $jsonData['integridad'] ?? null,
                 'luminosity_score' => $jsonData['luminosidad'] ?? null,
                 'uniformity_score' => $jsonData['uniformidad'] ?? null,
+                // ✅ Guardar métricas específicas de YOLO
+                'detection_confidence' => $jsonData['confidence'] ?? null,
+                'processing_method' => $jsonData['method'] ?? 'yolo_segmentation',
+                'algorithm_version' => $jsonData['algorithm_version'] ?? 'yolo_v8_segmentation',
             ]);
             $image->analysisResult()->save($analysis);
 
             $image->update(['status' => 'processed']);
             $image->load(['processedImage', 'analysisResult']);
 
-            Log::info("✅ Imagen {$image->id} procesada correctamente");
+            Log::info("✅ Imagen {$image->id} procesada correctamente con YOLO", [
+                'confidence' => $jsonData['confidence'] ?? 0,
+                'method' => $jsonData['method'] ?? 'yolo_segmentation',
+                'integridad' => $jsonData['integridad'] ?? 0
+            ]);
 
-/*            // ✅ CORREGIDO: Descomentar incremento de batch procesado
+            // ✅ Incrementar contador de batch procesado
             if ($batchId) {
                 $batch = \App\Models\ImageBatch::find($batchId);
                 if ($batch) {
@@ -292,16 +310,95 @@ class ImageProcessingService
                     $batch->touch();
                     Log::debug("📊 Batch {$batch->id}: processed {$oldProcessed} → {$batch->processed}");
                 }
-            }*/
+            }
 
             return $image;
 
         } catch (\Throwable $e) {
-            $msg = "Error guardando datos: " . $e->getMessage();
+            $msg = "Error guardando datos YOLO: " . $e->getMessage();
             Log::error("❌ " . $msg);
             $image->update(['status' => 'error']);
             $this->handleBatchError($batchId, $msg);
             return $image;
         }
+    }
+
+    /**
+     * ✅ Extrae JSON válido del output de Python, ignorando mensajes extra
+     */
+    private function extractJsonFromOutput(string $output): ?array
+    {
+        Log::debug("🔍 Extrayendo JSON del output:", ['output_length' => strlen($output)]);
+
+        // ✅ Método 1: Buscar último JSON válido línea por línea
+        $lines = explode("\n", $output);
+        for ($i = count($lines) - 1; $i >= 0; $i--) {
+            $line = trim($lines[$i]);
+            if (empty($line)) continue;
+
+            // Verificar si la línea parece ser JSON
+            if (str_starts_with($line, '{') && str_ends_with($line, '}')) {
+                $decoded = json_decode($line, true);
+                if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                    Log::debug("✅ JSON válido encontrado en línea", ['line_number' => $i + 1]);
+                    return $decoded;
+                }
+            }
+        }
+
+        // ✅ Método 2: Buscar desde la primera llave hasta el final válido
+        $jsonStart = strrpos($output, '{');
+        if ($jsonStart !== false) {
+            $possibleJson = substr($output, $jsonStart);
+            $decoded = json_decode($possibleJson, true);
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                Log::debug("✅ JSON válido encontrado desde última llave");
+                return $decoded;
+            }
+        }
+
+        // ✅ Método 3: Buscar patrón específico de nuestro JSON
+        if (preg_match('/\{"success"\s*:\s*(true|false).*?\}(?=\s*$)/s', $output, $matches)) {
+            $jsonCandidate = $matches[0];
+            $decoded = json_decode($jsonCandidate, true);
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                Log::debug("✅ JSON válido encontrado con patrón success");
+                return $decoded;
+            }
+        }
+
+        // ✅ Método 4: Buscar cualquier JSON con structure conocida
+        if (preg_match('/\{[^{}]*"method"\s*:\s*"[^"]*"[^{}]*\}/s', $output, $matches)) {
+            $jsonCandidate = $matches[0];
+            $decoded = json_decode($jsonCandidate, true);
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                Log::debug("✅ JSON válido encontrado con patrón method");
+                return $decoded;
+            }
+        }
+
+        // ✅ Método 5: Limpiar caracteres problemáticos y reintentar
+        $cleanOutput = preg_replace('/[^\x20-\x7E\n\r\t]/', '', $output); // Solo ASCII printable
+        $cleanOutput = preg_replace('/\n+/', '\n', $cleanOutput); // Unificar saltos de línea
+
+        if (preg_match('/\{.*"success".*\}/s', $cleanOutput, $matches)) {
+            $jsonCandidate = $matches[0];
+            $decoded = json_decode($jsonCandidate, true);
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                Log::debug("✅ JSON válido encontrado después de limpieza");
+                return $decoded;
+            }
+        }
+
+        Log::error("❌ No se pudo extraer JSON válido del output", [
+            'first_200_chars' => substr($output, 0, 200),
+            'last_200_chars' => substr($output, -200),
+            'total_length' => strlen($output),
+            'contains_success' => str_contains($output, '"success"'),
+            'contains_method' => str_contains($output, '"method"'),
+            'json_attempts' => 5
+        ]);
+
+        return null;
     }
 }
