@@ -166,7 +166,8 @@ Route::get('/downloads/{batchId}/{filename}', [DownloadController::class, 'downl
 
 Route::delete('/reports/{generation}/cancel', [ProjectController::class, 'cancelReportGeneration']);
 Route::delete('/reports/{generationId}', [ProjectController::class, 'deleteReport']);
-Route::get('/reports/{id}/download/{file?}', [ProjectController::class, 'downloadReport']);
+Route::get('/reports/{id}/download/{file?}', [ProjectController::class, 'downloadReport'])
+    ->name('reports.download');
 Route::post('/reports/cleanup', [ProjectController::class, 'cleanupExpiredReports']);
 
 Route::get('zip-analysis/{analysisId}/status', [LargeZipController::class, 'getAnalysisStatus']);
