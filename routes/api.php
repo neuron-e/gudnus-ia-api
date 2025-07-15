@@ -52,6 +52,8 @@ Route::prefix('projects')->group(function () {
     Route::post('/{project}/generate-basic-structure', [FolderController::class, 'generateBasicStructure']);
     Route::get('/{project}/check-structure', [FolderController::class, 'checkProjectStructure']);
 
+    Route::get('/{project}/download-urls/{generation?}', [ProjectController::class, 'getReportDownloadUrls']);
+    Route::get('/{project}/{generation}/file/{fileName}/url', [ProjectController::class, 'getReportFileUrl']);
     Route::post('/{project}/reports/generate', [ProjectController::class, 'generateReport']);
     Route::get('/{project}/reports/status/{generation?}', [ProjectController::class, 'getReportStatus']);
     Route::get('/{project}/reports', [ProjectController::class, 'listReports']);

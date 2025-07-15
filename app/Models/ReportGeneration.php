@@ -60,6 +60,61 @@ class ReportGeneration extends Model
         })->toArray();
     }
 
+    public function getPresignedDownloadUrls(int $expirationHours = 24): array
+    {
+        if (!$this->isReady()) {
+            return [];
+        }
+
+        $filePaths = is_array($this->file_path) ? $this->file_path : [$this->file_path];
+        $presignedUrls = [];
+
+        $wasabi = Storage::disk('wasabi');
+        $s3Client = $wasabi->getAdapter()->getClient();
+
+        foreach ($filePaths as $path) {
+            if ($wasabi->exists($path)) {
+                try {
+                    // ✅ Generar URL presignada válida por X horas
+                    $command = $s3Client->getCommand('GetObject', [
+                        'Bucket' => config('filesystems.disks.wasabi.bucket'),
+                        'Key' => $path
+                    ]);
+
+                    $presignedRequest = $s3Client->createPresignedRequest(
+                        $command,
+                        "+{$expirationHours} hours"
+                    );
+
+                    $presignedUrls[] = [
+                        'file_name' => basename($path),
+                        'file_path' => $path,
+                        'size_mb' => round($wasabi->size($path) / 1024 / 1024, 2),
+                        'download_url' => (string) $presignedRequest->getUri(),
+                        'expires_at' => now()->addHours($expirationHours)->toISOString()
+                    ];
+
+                } catch (\Exception $e) {
+                    \Log::error("Error generando URL presignada para {$path}: " . $e->getMessage());
+                }
+            }
+        }
+
+        return $presignedUrls;
+    }
+
+    public function getSinglePresignedUrl(string $fileName = null, int $expirationHours = 24): ?array
+    {
+        $urls = $this->getPresignedDownloadUrls($expirationHours);
+
+        if ($fileName) {
+            return collect($urls)->first(fn($url) => $url['file_name'] === $fileName);
+        }
+
+        return $urls[0] ?? null;
+    }
+
+
     /**
      * 🆕 NUEVO: Mover reporte a Wasabi si es grande (SIN CAMPO storage_type)
      */

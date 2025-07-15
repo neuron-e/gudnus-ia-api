@@ -239,10 +239,10 @@ class ProjectController extends Controller
 
         // ✅ Calcular chunk size dinámico
         $defaultChunkSize = match(true) {
-            $imageCount > 2000 => 25,  // Proyectos masivos
-            $imageCount > 1000 => 35,  // Proyectos grandes
-            $imageCount > 500 => 50,   // Proyectos medianos
-            default => 75              // Proyectos pequeños
+            $imageCount > 2000 => 2000,  // ✅ Aumentar límites
+            $imageCount > 1000 => 1500,
+            $imageCount > 500 => 1000,
+            default => 5000              // ✅ Sin límite para proyectos normales
         };
 
         Log::info("🚀 Iniciando generación asíncrona de reporte para proyecto {$project->id} con {$imageCount} imágenes");
@@ -276,6 +276,81 @@ class ProjectController extends Controller
             'chunk_size' => $defaultChunkSize, // ✅ Informar chunk size usado
         ]);
     }
+
+    public function getReportDownloadUrls(Project $project, $generationId = null)
+    {
+        $query = ReportGeneration::where('project_id', $project->id);
+
+        if ($generationId) {
+            $generation = $query->findOrFail($generationId);
+        } else {
+            $generation = $query->where('status', 'completed')
+                ->latest('completed_at')
+                ->first();
+        }
+
+        if (!$generation) {
+            return response()->json([
+                'error' => 'No se encontró un reporte disponible',
+            ], 404);
+        }
+
+        if (!$generation->isReady()) {
+            return response()->json([
+                'error' => 'El reporte no está listo o ha expirado',
+                'status' => $generation->status,
+                'expired' => $generation->hasExpired()
+            ], 410);
+        }
+
+        // ✅ Generar URLs presignadas válidas por 6 horas
+        $downloadUrls = $generation->getPresignedDownloadUrls(6);
+
+        if (empty($downloadUrls)) {
+            return response()->json([
+                'error' => 'No hay archivos disponibles para descarga',
+            ], 404);
+        }
+
+        return response()->json([
+            'generation_id' => $generation->id,
+            'project_id' => $project->id,
+            'total_files' => count($downloadUrls),
+            'total_size_mb' => array_sum(array_column($downloadUrls, 'size_mb')),
+            'expires_at' => $downloadUrls[0]['expires_at'], // Todas expiran al mismo tiempo
+            'files' => $downloadUrls,
+            'instructions' => count($downloadUrls) > 1
+                ? 'Descarga cada archivo usando su URL directa. Los enlaces son válidos por 6 horas.'
+                : 'Descarga directa disponible. El enlace es válido por 6 horas.'
+        ]);
+    }
+
+    /**
+     * ✅ NUEVO: URL presignada para un archivo específico
+     */
+    public function getReportFileUrl(Project $project, $generationId, $fileName)
+    {
+        $generation = ReportGeneration::where('project_id', $project->id)
+            ->findOrFail($generationId);
+
+        if (!$generation->isReady()) {
+            return response()->json([
+                'error' => 'El reporte no está disponible',
+                'status' => $generation->status
+            ], 410);
+        }
+
+        $fileUrl = $generation->getSinglePresignedUrl($fileName, 6);
+
+        if (!$fileUrl) {
+            return response()->json([
+                'error' => 'Archivo no encontrado: ' . $fileName
+            ], 404);
+        }
+
+        return response()->json($fileUrl);
+    }
+
 
     /**
      * ✅ NUEVO: Obtener estado de generación de reporte
@@ -465,47 +540,25 @@ class ProjectController extends Controller
                     'expires_at' => $generation->expires_at,
                     'is_expired' => $generation->hasExpired(),
                     'user_email' => $generation->user_email,
-                    'storage_type' => $generation->getStorageType(), // ✅ Método que detecta automáticamente
                 ];
 
-                if ($generation->isReady() && !$generation->hasExpired()) {
-                    $filePaths = is_array($generation->file_path) ? $generation->file_path : [$generation->file_path];
+                if ($generation->isReady()) {
+                    // ✅ Incluir URLs presignadas directamente
+                    $downloadUrls = $generation->getPresignedDownloadUrls(6);
 
-                    $existingFiles = [];
-                    $totalSize = 0;
+                    $data['files'] = $downloadUrls;
+                    $data['total_size_mb'] = array_sum(array_column($downloadUrls, 'size_mb'));
+                    $data['file_count'] = count($downloadUrls);
+                    $data['can_download'] = count($downloadUrls) > 0;
+                    $data['direct_download'] = true; // ✅ Indica que son URLs directas
 
-                    foreach ($filePaths as $path) {
-                        $size = $generation->getFileSize($path); // ✅ Método del modelo
-
-                        if ($size > 0) { // Solo incluir archivos que existen
-                            $existingFiles[] = [
-                                'path' => $path,
-                                'name' => basename($path),
-                                'size' => $size,
-                                'size_mb' => round($size / 1024 / 1024, 2),
-                                'storage_type' => str_starts_with($path, 'reports/') ? 'wasabi' : 'local',
-                                'download_url' => route('reports.download', [
-                                    'id' => $generation->id,
-                                    'file' => basename($path)
-                                ])
-                            ];
-                            $totalSize += $size;
-                        }
-                    }
-
-                    $data['files'] = $existingFiles;
-                    $data['total_size_mb'] = round($totalSize / 1024 / 1024, 2);
-                    $data['file_count'] = count($existingFiles);
-                    $data['can_download'] = count($existingFiles) > 0;
-                    $data['download_urls'] = array_column($existingFiles, 'download_url');
-
-                    if (count($existingFiles) > 0) {
-                        $data['primary_download_url'] = $existingFiles[0]['download_url'];
+                    if (!empty($downloadUrls)) {
+                        $data['primary_download_url'] = $downloadUrls[0]['download_url'];
                     }
                 } else {
                     $data['files'] = [];
                     $data['can_download'] = false;
-                    $data['download_urls'] = [];
+                    $data['direct_download'] = false;
                 }
 
                 return $data;
@@ -518,6 +571,7 @@ class ProjectController extends Controller
             'processing_reports' => $reports->where('status', 'processing')->count(),
         ]);
     }
+
 
     /**
      * ✅ NUEVO: Cancelar generación en proceso
