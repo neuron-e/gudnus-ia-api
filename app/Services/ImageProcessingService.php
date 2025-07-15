@@ -1,15 +1,12 @@
 <?php
-// Versión CORREGIDA del ImageProcessingService con logging detallado
 
 namespace App\Services;
 
 use App\Models\Image;
 use App\Models\ImageAnalysisResult;
 use App\Models\ProcessedImage;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 
 class ImageProcessingService
 {
@@ -20,7 +17,6 @@ class ImageProcessingService
         $batch = \App\Models\ImageBatch::find($batchId);
         if (!$batch) return;
 
-        // ✅ CORREGIDO: Descomentar incremento de errores
         $batch->increment('errors');
         $batch->update([
             'error_messages' => array_merge($batch->error_messages ?? [], [$msg]),
@@ -30,7 +26,7 @@ class ImageProcessingService
 
     public function process(Image $image, $batchId = null): Image | null
     {
-        Log::info("🔧 INICIANDO ImageProcessingService para imagen {$image->id}");
+        Log::info("🔧 INICIANDO ImageProcessingService YOLO para imagen {$image->id}");
 
         if (!$image || !$image->original_path) {
             $msg = "Imagen no encontrada para procesar (ID: {$image?->id})";
@@ -49,20 +45,46 @@ class ImageProcessingService
             return $image;
         }
 
-        // ✅ Verificar configuración de Python
+        // ✅ CONFIGURACIÓN YOLO CORREGIDA
         $pythonPath = env('PYTHON_PATH', '/usr/bin/python3');
-        $scriptPath = storage_path('app/scripts/process_image_wrapped.py');
-        $modelPath = storage_path('app/scripts/best.pt'); // ✅ Modelo YOLO
+        $scriptPath = storage_path('app/scripts/process_image_wrapped.py'); // ✅ SCRIPT YOLO CORRECTO
+        $modelPath = storage_path('app/scripts/best.pt'); // ✅ MODELO YOLO
 
-        Log::debug("🐍 Configuración Python:", [
+        // ✅ Usar configuración de .env si está disponible
+        $modelPathEnv = env('YOLO_MODEL_PATH');
+        if ($modelPathEnv && file_exists($modelPathEnv)) {
+            $modelPath = $modelPathEnv;
+        }
+
+        // ✅ Obtener configuración del proyecto para filas/columnas
+        $project = $image->project;
+        $filas = $project?->cell_count ?? env('DEFAULT_PANEL_ROWS', 24);
+        $columnas = $project?->column_count ?? env('DEFAULT_PANEL_COLUMNS', 6);
+        $confidence = env('YOLO_DEFAULT_CONFIDENCE', 0.5);
+
+        Log::debug("🤖 Configuración YOLO:", [
             'python_path' => $pythonPath,
             'script_path' => $scriptPath,
+            'model_path' => $modelPath,
             'script_exists' => file_exists($scriptPath),
+            'model_exists' => file_exists($modelPath),
+            'filas' => $filas,
+            'columnas' => $columnas,
+            'confidence' => $confidence,
             'python_executable' => is_executable($pythonPath)
         ]);
 
+        // Verificar archivos críticos
         if (!file_exists($scriptPath)) {
-            $msg = "Script de Python no encontrado: {$scriptPath}";
+            $msg = "Script YOLO no encontrado: {$scriptPath}";
+            Log::error("❌ " . $msg);
+            $image->update(['status' => 'error']);
+            $this->handleBatchError($batchId, $msg);
+            return $image;
+        }
+
+        if (!file_exists($modelPath)) {
+            $msg = "Modelo YOLO no encontrado: {$modelPath}";
             Log::error("❌ " . $msg);
             $image->update(['status' => 'error']);
             $this->handleBatchError($batchId, $msg);
@@ -92,14 +114,15 @@ class ImageProcessingService
             return $image;
         }
 
-        // ✅ Paths temporales con ID único
-        $nameWithoutExt = pathinfo($image->filename ?? 'panel', PATHINFO_FILENAME);
-        $filename = 'processed_' . $nameWithoutExt . '.jpg';
-        $originalTemp = $tmpDir . '/original_' . $filename;
+        // ✅ PATHS TEMPORALES ÚNICOS (CORREGIDO)
+        $uniqueId = uniqid('yolo_' . $image->id . '_' . getmypid() . '_', true);
+        $filename = 'yolo_processed_' . $uniqueId . '.jpg';
+        $originalTemp = $tmpDir . '/original_' . $uniqueId . '.jpg';
         $outputTemp = $tmpDir . '/' . $filename;
-        $wasabiProcessedPath = "projects/{$image->project_id}/images/processed/{$filename}";
+        $wasabiProcessedPath = "projects/{$image->project_id}/images/processed/{$filename}"; // ✅ PATH CORREGIDO
 
-        Log::debug("📁 Paths generados:", [
+        Log::debug("📁 Paths YOLO generados:", [
+            'unique_id' => $uniqueId,
             'original_temp' => $originalTemp,
             'output_temp' => $outputTemp,
             'wasabi_processed' => $wasabiProcessedPath
@@ -143,11 +166,22 @@ class ImageProcessingService
             return $image;
         }
 
-        // ✅ Ejecutar script Python con mejor logging
-        $cmd = "\"$pythonPath\" \"$scriptPath\" \"$originalTemp\" \"$outputTemp\" \"$modelPath\"";
-        Log::debug("🐍 Ejecutando comando Python:", ['cmd' => $cmd]);
+        // ✅ EJECUTAR SCRIPT YOLO CON TODOS LOS PARÁMETROS (CORREGIDO)
+        $cmd = sprintf(
+            '"%s" "%s" "%s" "%s" "%s" --filas %d --columnas %d --confidence %.2f',
+            $pythonPath,
+            $scriptPath,
+            $originalTemp,
+            $outputTemp,
+            $modelPath,
+            $filas,
+            $columnas,
+            $confidence
+        );
 
-        // ✅ Ejecutar con timeout y captura de errores
+        Log::debug("🤖 Ejecutando comando YOLO COMPLETO:", ['cmd' => $cmd]);
+
+        // ✅ Ejecutar con timeout aumentado para YOLO
         $descriptorspec = [
             0 => ["pipe", "r"],  // stdin
             1 => ["pipe", "w"],  // stdout
@@ -156,7 +190,7 @@ class ImageProcessingService
 
         $process = proc_open($cmd, $descriptorspec, $pipes);
 
-        $timeoutSeconds = 60;
+        $timeoutSeconds = env('YOLO_TIMEOUT_SECONDS', 120); // ✅ Timeout para YOLO
         $start = time();
 
         while (is_resource($process)) {
@@ -166,7 +200,7 @@ class ImageProcessingService
             }
             if ((time() - $start) > $timeoutSeconds) {
                 proc_terminate($process, 9); // SIGKILL
-                $msg = "Timeout alcanzado al ejecutar el script (>$timeoutSeconds s)";
+                $msg = "Timeout alcanzado al ejecutar YOLO (>$timeoutSeconds s)";
                 Log::error("❌ " . $msg);
                 $image->update(['status' => 'error']);
                 $this->handleBatchError($batchId, $msg);
@@ -186,7 +220,7 @@ class ImageProcessingService
 
         $returnCode = proc_close($process);
 
-        Log::debug("🐍 Resultado comando Python:", [
+        Log::debug("🤖 Resultado comando YOLO:", [
             'return_code' => $returnCode,
             'stdout_length' => strlen($stdout),
             'stderr_length' => strlen($stderr),
@@ -195,7 +229,7 @@ class ImageProcessingService
         ]);
 
         if ($returnCode !== 0) {
-            $msg = "Script Python falló (código: {$returnCode})";
+            $msg = "Script YOLO falló (código: {$returnCode})";
             Log::error("❌ " . $msg, [
                 'stdout' => $stdout,
                 'stderr' => $stderr
@@ -208,7 +242,7 @@ class ImageProcessingService
         }
 
         if (!file_exists($outputTemp) || filesize($outputTemp) === 0) {
-            $msg = "Script Python no generó output válido";
+            $msg = "Script YOLO no generó output válido";
             Log::error("❌ " . $msg, [
                 'output_exists' => file_exists($outputTemp),
                 'output_size' => file_exists($outputTemp) ? filesize($outputTemp) : 0,
@@ -223,14 +257,14 @@ class ImageProcessingService
 
         try {
             // ✅ Subir imagen procesada
-            Log::debug("⬆️ Subiendo imagen procesada a Wasabi...");
+            Log::debug("⬆️ Subiendo imagen YOLO procesada a Wasabi...");
             $wasabiDisk->put($wasabiProcessedPath, file_get_contents($outputTemp));
 
             if (!$wasabiDisk->exists($wasabiProcessedPath)) {
                 throw new \Exception("El archivo no existe en Wasabi después de subirlo");
             }
 
-            Log::debug("✅ Imagen subida a Wasabi correctamente");
+            Log::debug("✅ Imagen YOLO subida a Wasabi correctamente");
 
         } catch (\Throwable $e) {
             $msg = "Error subiendo imagen procesada: " . $e->getMessage();
@@ -246,8 +280,7 @@ class ImageProcessingService
         @unlink($originalTemp);
         @unlink($outputTemp);
 
-        // ✅ Parsear JSON output
-        // ✅ Parsear JSON output de YOLO de forma robusta
+        // ✅ PARSEAR JSON CON MÉTODO ROBUSTO (CORREGIDO)
         Log::debug("📊 Parseando output JSON del script YOLO...");
         $jsonData = $this->extractJsonFromOutput($stdout);
         if (!$jsonData) {
@@ -280,12 +313,12 @@ class ImageProcessingService
 
             $analysis = $image->analysisResult ?? new ImageAnalysisResult();
             $analysis->fill([
-                'rows' => $jsonData['filas'] ?? 24,
-                'columns' => $jsonData['columnas'] ?? 6,
+                'rows' => $jsonData['filas'] ?? $filas,
+                'columns' => $jsonData['columnas'] ?? $columnas,
                 'integrity_score' => $jsonData['integridad'] ?? null,
                 'luminosity_score' => $jsonData['luminosidad'] ?? null,
                 'uniformity_score' => $jsonData['uniformidad'] ?? null,
-                // ✅ Guardar métricas específicas de YOLO
+                // ✅ Métricas específicas de YOLO
                 'detection_confidence' => $jsonData['confidence'] ?? null,
                 'processing_method' => $jsonData['method'] ?? 'yolo_segmentation',
                 'algorithm_version' => $jsonData['algorithm_version'] ?? 'yolo_v8_segmentation',
@@ -298,7 +331,8 @@ class ImageProcessingService
             Log::info("✅ Imagen {$image->id} procesada correctamente con YOLO", [
                 'confidence' => $jsonData['confidence'] ?? 0,
                 'method' => $jsonData['method'] ?? 'yolo_segmentation',
-                'integridad' => $jsonData['integridad'] ?? 0
+                'integridad' => $jsonData['integridad'] ?? 0,
+                'unique_id' => $uniqueId
             ]);
 
             // ✅ Incrementar contador de batch procesado
@@ -324,7 +358,7 @@ class ImageProcessingService
     }
 
     /**
-     * ✅ Extrae JSON válido del output de Python, ignorando mensajes extra
+     * ✅ EXTRAE JSON VÁLIDO DEL OUTPUT - MÉTODO ROBUSTO
      */
     private function extractJsonFromOutput(string $output): ?array
     {
@@ -336,7 +370,6 @@ class ImageProcessingService
             $line = trim($lines[$i]);
             if (empty($line)) continue;
 
-            // Verificar si la línea parece ser JSON
             if (str_starts_with($line, '{') && str_ends_with($line, '}')) {
                 $decoded = json_decode($line, true);
                 if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
@@ -346,7 +379,7 @@ class ImageProcessingService
             }
         }
 
-        // ✅ Método 2: Buscar desde la primera llave hasta el final válido
+        // ✅ Método 2: Buscar desde la última llave hasta el final válido
         $jsonStart = strrpos($output, '{');
         if ($jsonStart !== false) {
             $possibleJson = substr($output, $jsonStart);
