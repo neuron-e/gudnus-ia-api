@@ -301,7 +301,12 @@ class DownloadController extends Controller
      */
     private function getImageCountByType($projectId, $type): int
     {
-        $query = Image::whereHas('folder', fn($q) => $q->where('project_id', $projectId));
+        $query = Image::whereHas('folder', fn($q) => $q->where('project_id', $projectId))
+            ->where(function($q) {
+                // ✅ Solo contar imágenes que tengan original_path válido
+                $q->whereNotNull('original_path')
+                    ->where('original_path', '!=', '');
+            });
 
         switch ($type) {
             case 'original':
@@ -310,12 +315,16 @@ class DownloadController extends Controller
             case 'processed':
                 return $query->whereHas('processedImage', fn($q) =>
                 $q->whereNotNull('corrected_path')
+                    ->where('corrected_path', '!=', '')
                 )->count();
 
             case 'analyzed':
                 return $query->whereHas('processedImage', fn($q) =>
                 $q->whereNotNull('corrected_path')
+                    ->where('corrected_path', '!=', '')
                     ->whereNotNull('ai_response_json')
+                    ->where('ai_response_json', '!=', '{}')
+                    ->where('ai_response_json', '!=', '')
                 )->count();
 
             case 'all':
@@ -336,28 +345,52 @@ class DownloadController extends Controller
         return collect($batch->file_paths)->map(function($path) use ($batch) {
             $filename = basename($path);
 
-            // ✅ Determinar tamaño del archivo
-            $size = 'Desconocido';
-            if (str_starts_with($path, 'downloads/')) {
-                // Archivo en Wasabi
-                $wasabi = Storage::disk('wasabi');
-                if ($wasabi->exists($path)) {
-                    $size = $this->formatFileSize($wasabi->size($path));
-                }
-            } else {
-                // Archivo local
-                if (file_exists($path)) {
-                    $size = $this->formatFileSize(filesize($path));
-                }
-            }
+            // ✅ Determinar tamaño y tipo del archivo
+            $fileInfo = $this->getFileInfo($path);
 
             return [
                 'filename' => $filename,
                 'url' => route('downloads.file', ['batchId' => $batch->id, 'filename' => $filename]),
-                'size' => $size,
-                'storage_type' => str_starts_with($path, 'downloads/') ? 'wasabi' : 'local'
+                'size' => $fileInfo['size'],
+                'storage_type' => $fileInfo['storage_type'],
+                'type' => $batch->type,
+                // ✅ NUEVO: Información adicional
+                'estimated_images' => $this->estimateImagesInZip($filename),
+                'is_multi_part' => str_contains($filename, '_parte_') !== false
             ];
         })->toArray();
+    }
+
+    private function getFileInfo($path): array
+    {
+        if (str_starts_with($path, 'downloads/')) {
+            // Archivo en Wasabi
+            $wasabi = Storage::disk('wasabi');
+            return [
+                'size' => $wasabi->exists($path) ? $this->formatFileSize($wasabi->size($path)) : 'Desconocido',
+                'storage_type' => 'wasabi'
+            ];
+        } else {
+            // Archivo local
+            return [
+                'size' => file_exists($path) ? $this->formatFileSize(filesize($path)) : 'Desconocido',
+                'storage_type' => 'local'
+            ];
+        }
+    }
+
+// ✅ NUEVO: Estimar contenido del ZIP
+    private function estimateImagesInZip($filename): string
+    {
+        if (str_contains($filename, '_parte_') !== false) {
+            // Extraer número de parte
+            if (preg_match('/_parte_(\d+)_/', $filename, $matches)) {
+                return "Parte {$matches[1]}";
+            }
+            return 'Parte del conjunto';
+        }
+
+        return 'Archivo completo';
     }
 
     /**

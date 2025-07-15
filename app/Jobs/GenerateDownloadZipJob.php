@@ -309,20 +309,28 @@ class GenerateDownloadZipJob implements ShouldQueue
         foreach ($images as $index => $img) {
             try {
                 $folderPath = $this->getFolderPathForZip($img->folder, $folders);
-                $baseName = pathinfo($img->filename ?? 'image', PATHINFO_FILENAME) ?: 'imagen';
+
+                // ✅ SIMPLIFICADO: Obtener nombre original solo desde original_path
+                $originalBaseName = $this->getOriginalImageName($img);
 
                 $addedAnyFile = false;
 
                 // ✅ Agregar archivos según el tipo solicitado
                 if (in_array($type, ['original', 'all']) && $img->original_path && $wasabi->exists($img->original_path)) {
-                    $filename = "{$baseName}_original.jpg";
+                    // ✅ MANTENER EXTENSIÓN ORIGINAL
+                    $originalExtension = $this->getOriginalExtension($img->original_path);
+                    $filename = "{$originalBaseName}{$originalExtension}";
+
                     $zip->addFromString("{$root}/{$folderPath}/original/{$filename}", $wasabi->get($img->original_path));
                     $addedAnyFile = true;
                 }
 
                 if ($img->processedImage && $img->processedImage->corrected_path && $wasabi->exists($img->processedImage->corrected_path)) {
                     if (in_array($type, ['processed', 'all'])) {
-                        $filename = "{$baseName}_processed.jpg";
+                        // ✅ USAR NOMBRE ORIGINAL + _processed + EXTENSIÓN ORIGINAL
+                        $originalExtension = $this->getOriginalExtension($img->original_path);
+                        $filename = "{$originalBaseName}_processed{$originalExtension}";
+
                         $zip->addFromString("{$root}/{$folderPath}/processed/{$filename}", $wasabi->get($img->processedImage->corrected_path));
                         $addedAnyFile = true;
                     }
@@ -331,7 +339,10 @@ class GenerateDownloadZipJob implements ShouldQueue
                     if (in_array($type, ['analyzed', 'all']) && $img->processedImage->ai_response_json) {
                         $analyzedContent = $this->generateAnalyzedImageContent($img->processedImage);
                         if ($analyzedContent) {
-                            $filename = "{$baseName}_analyzed.jpg";
+                            // ✅ USAR NOMBRE ORIGINAL + _analyzed + EXTENSIÓN ORIGINAL
+                            $originalExtension = $this->getOriginalExtension($img->original_path);
+                            $filename = "{$originalBaseName}_analyzed{$originalExtension}";
+
                             $zip->addFromString("{$root}/{$folderPath}/analyzed/{$filename}", $analyzedContent);
                             $addedAnyFile = true;
                         }
@@ -362,6 +373,64 @@ class GenerateDownloadZipJob implements ShouldQueue
 
         return $zipPath;
     }
+
+    private function getOriginalImageName($image): string
+    {
+        // ✅ Usar original_path que es lo único disponible por ahora
+        if ($image->original_path) {
+            $originalFilename = basename($image->original_path);
+            $baseName = pathinfo($originalFilename, PATHINFO_FILENAME);
+
+            if ($baseName && $baseName !== 'image' && !empty($baseName)) {
+                return $baseName;
+            }
+        }
+
+        // ✅ Fallback: Intentar extraer desde corrected_path como último recurso
+        if ($image->processedImage && $image->processedImage->corrected_path) {
+            $processedFilename = basename($image->processedImage->corrected_path);
+
+            // Intentar extraer nombre original de nombres como "yolo_processed_yolo_14047_1133364_68760f5a9c4c52.66069594.jpg"
+            if (preg_match('/yolo_processed_yolo_\d+_\d+_([a-zA-Z0-9_\-\.]+)\./', $processedFilename, $matches)) {
+                $extractedName = pathinfo($matches[1], PATHINFO_FILENAME);
+                if (!empty($extractedName)) {
+                    return $extractedName;
+                }
+            }
+
+            // Intentar extraer desde nombres como "manual_6lAMNxF9.jpg"
+            if (preg_match('/manual_([a-zA-Z0-9_\-]+)\./', $processedFilename, $matches)) {
+                if (!empty($matches[1])) {
+                    return $matches[1];
+                }
+            }
+        }
+
+        // ✅ Fallback final: Usar ID de imagen
+        return "imagen_{$image->id}";
+    }
+
+    /**
+     * ✅ NUEVO: Obtener extensión original de la imagen
+     */
+    private function getOriginalExtension($originalPath): string
+    {
+        if (!$originalPath) {
+            return '.jpg'; // Extensión por defecto
+        }
+
+        $extension = '.' . strtolower(pathinfo($originalPath, PATHINFO_EXTENSION));
+
+        // ✅ Validar que sea una extensión de imagen válida
+        $validExtensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'];
+
+        if (in_array($extension, $validExtensions)) {
+            return $extension;
+        }
+
+        return '.jpg'; // Fallback
+    }
+
 
     private function getFolderPathForZip($folder, $foldersById): string
     {
