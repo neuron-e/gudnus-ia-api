@@ -44,6 +44,11 @@ class Project extends Model
         return $this->hasMany(Folder::class);
     }
 
+    public function children()
+    {
+        return $this->hasMany(Folder::class);
+    }
+
     /**
      * 🖼️ NUEVA: Relación directa con imágenes
      */
