@@ -237,6 +237,14 @@ class ProjectController extends Controller
             ], 400);
         }
 
+        // ✅ Calcular chunk size dinámico
+        $defaultChunkSize = match(true) {
+            $imageCount > 2000 => 25,  // Proyectos masivos
+            $imageCount > 1000 => 35,  // Proyectos grandes
+            $imageCount > 500 => 50,   // Proyectos medianos
+            default => 75              // Proyectos pequeños
+        };
+
         Log::info("🚀 Iniciando generación asíncrona de reporte para proyecto {$project->id} con {$imageCount} imágenes");
 
         // ✅ Crear registro de seguimiento
@@ -253,18 +261,19 @@ class ProjectController extends Controller
         // ✅ Despachar job asíncrono
         $job = new GenerateReportJob(
             projectId: $project->id,
-            userEmail: $request->input('userEmail'),
-            maxImagesPerPage: $request->input('maxImagesPerPage', 500),
-            includeAnalyzedImages: $request->input('includeAnalyzedImages', true)
+            userEmail: $request->input('user_email'), // ✅ CORREGIDO: era 'userEmail'
+            maxImagesPerPage: $request->input('max_images_per_page', $defaultChunkSize), // ✅ Chunk dinámico
+            includeAnalyzedImages: $request->input('include_analyzed_images', true)
         );
 
-        dispatch($job)->onQueue('reports'); // ✅ Cola específica para reportes
+        dispatch($job)->onQueue('reports');
 
         return response()->json([
             'message' => 'Generación de reporte iniciada. Recibirás una notificación cuando esté listo.',
             'generation_id' => $reportGeneration->id,
             'estimated_time' => $this->estimateGenerationTime($imageCount),
             'total_images' => $imageCount,
+            'chunk_size' => $defaultChunkSize, // ✅ Informar chunk size usado
         ]);
     }
 
@@ -570,19 +579,22 @@ class ProjectController extends Controller
 
     private function estimateGenerationTime(int $imageCount): string
     {
-        // ✅ Estimación conservadora: 1-2 segundos por imagen
-        $estimatedSeconds = $imageCount * 1.5;
+        // ✅ Estimación más conservadora
+        $minutesPerImage = match(true) {
+            $imageCount > 2000 => 0.15,  // 9 segundos por imagen para proyectos masivos
+            $imageCount > 1000 => 0.12,  // 7 segundos por imagen para proyectos grandes
+            $imageCount > 500 => 0.10,   // 6 segundos por imagen para proyectos medianos
+            default => 0.08              // 5 segundos por imagen para proyectos pequeños
+        };
 
-        if ($estimatedSeconds < 60) {
-            return 'Menos de 1 minuto';
-        } elseif ($estimatedSeconds < 300) {
-            return 'Entre 1-5 minutos';
-        } elseif ($estimatedSeconds < 900) {
-            return 'Entre 5-15 minutos';
-        } elseif ($estimatedSeconds < 1800) {
-            return 'Entre 15-30 minutos';
+        $totalMinutes = $imageCount * $minutesPerImage;
+        $hours = floor($totalMinutes / 60);
+        $minutes = round($totalMinutes % 60);
+
+        if ($hours > 0) {
+            return "{$hours}h {$minutes}m";
         } else {
-            return 'Más de 30 minutos';
+            return "{$minutes} minutos";
         }
     }
 

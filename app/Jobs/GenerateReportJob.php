@@ -25,30 +25,40 @@ class GenerateReportJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $timeout = 3600; // 1 hora máximo
-    public $tries = 2;
-    public $maxExceptions = 3;
+    // ✅ CONFIGURACIÓN OPTIMIZADA PARA PROYECTOS GRANDES
+    public $timeout = 14400; // 4 horas (era 1 hora)
+    public $tries = 1;        // Solo 1 intento (era 2)
+    public $maxExceptions = 1;
 
     public function __construct(
         public int $projectId,
         public ?string $userEmail = null,
-        public int $maxImagesPerPage = 50,
+        public int $maxImagesPerPage = 50, // ✅ Reducido de 500 a 50 por defecto
         public bool $includeAnalyzedImages = true
-    ) {}
+    ) {
+        // ✅ Configurar memoria explícitamente
+        ini_set('memory_limit', '2G');
+    }
 
     public function handle(): void
     {
         $reportGeneration = ReportGeneration::where('project_id', $this->projectId)->latest()->first();
 
         try {
-            Log::info("🚀 Iniciando generación de PDF para proyecto {$this->projectId}");
+            Log::info("🚀 GenerateReportJob iniciado", [
+                'project_id' => $this->projectId,
+                'timeout' => $this->timeout,
+                'max_images_per_page' => $this->maxImagesPerPage,
+                'memory_limit' => ini_get('memory_limit')
+            ]);
 
             $project = Project::with(['children'])->findOrFail($this->projectId);
 
-            // ✅ 1. Preparar datos básicos del proyecto
+            // ✅ Verificar espacio disponible
+            $this->checkAvailableSpace();
+
             $this->loadProjectStructure($project);
 
-            // ✅ 2. Obtener imágenes en lotes
             $allImages = $this->collectAllImages($project);
             $totalImages = $allImages->count();
 
@@ -60,8 +70,14 @@ class GenerateReportJob implements ShouldQueue
 
             Log::info("📊 Total de imágenes a procesar: {$totalImages}");
 
-            // ✅ 3. Dividir en chunks para PDFs grandes
-            $shouldSplit = $totalImages > $this->maxImagesPerPage;
+            // ✅ CHUNKS DINÁMICOS según tamaño del proyecto
+            $optimalChunkSize = $this->calculateOptimalChunkSize($totalImages);
+            $this->maxImagesPerPage = $optimalChunkSize;
+
+            Log::info("📦 Usando chunks de {$optimalChunkSize} imágenes para proyecto de {$totalImages} imágenes");
+
+            // ✅ Siempre dividir en chunks para proyectos grandes
+            $shouldSplit = $totalImages > $optimalChunkSize;
 
             if ($shouldSplit) {
                 $this->generateMultiPartReport($project, $allImages, $reportGeneration);
@@ -75,16 +91,12 @@ class GenerateReportJob implements ShouldQueue
                 'completed_at' => now()
             ]);
 
-            // ✅ 4. Enviar notificación por email
-     /*       if ($this->userEmail) {
-                Mail::to($this->userEmail)->send(new ReportGeneratedMail($reportGeneration));
-            }*/
-
             Log::info("✅ PDF generado exitosamente para proyecto {$this->projectId}");
 
         } catch (\Throwable $e) {
             Log::error("❌ Error generando PDF: " . $e->getMessage(), [
                 'project_id' => $this->projectId,
+                'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB',
                 'trace' => $e->getTraceAsString()
             ]);
 
@@ -95,6 +107,40 @@ class GenerateReportJob implements ShouldQueue
 
             throw $e;
         }
+    }
+
+    /**
+     * ✅ NUEVO: Verificar espacio disponible
+     */
+    private function checkAvailableSpace(): void
+    {
+        $storagePath = storage_path('app');
+        $freeBytes = disk_free_space($storagePath);
+
+        if (!$freeBytes) {
+            Log::warning("⚠️ No se pudo verificar espacio disponible");
+            return;
+        }
+
+        $freeGB = $freeBytes / 1024 / 1024 / 1024;
+        Log::info("💾 Espacio libre: {$freeGB}GB");
+
+        if ($freeGB < 5) {
+            throw new \Exception("Espacio insuficiente: {$freeGB}GB libres. Se requieren al menos 5GB para generar reportes.");
+        }
+    }
+
+    /**
+     * ✅ NUEVO: Calcular tamaño de chunk óptimo
+     */
+    private function calculateOptimalChunkSize($totalImages): int
+    {
+        return match(true) {
+            $totalImages > 2000 => 25,  // ✅ Proyectos masivos: chunks muy pequeños
+            $totalImages > 1000 => 35,  // ✅ Proyectos grandes
+            $totalImages > 500 => 50,   // ✅ Proyectos medianos
+            default => 75               // ✅ Proyectos pequeños
+        };
     }
 
     /**
@@ -129,12 +175,20 @@ class GenerateReportJob implements ShouldQueue
         $chunks = $allImages->chunk($this->maxImagesPerPage);
         $pdfPaths = [];
         $tempDir = $this->createTempDirectory();
+        $totalProcessed = 0;
 
         try {
             foreach ($chunks as $index => $chunk) {
-                Log::info("📄 Generando parte " . ($index + 1) . " de " . $chunks->count());
+                // ✅ Liberar memoria entre chunks
+                if ($index > 0) {
+                    gc_collect_cycles();
+                    $memoryMB = memory_get_usage(true) / 1024 / 1024;
+                    Log::info("🧹 Memoria liberada. Uso actual: {$memoryMB}MB");
+                }
 
-                // Pre-generar imágenes analizadas para este chunk
+                Log::info("📄 Generando parte " . ($index + 1) . " de " . $chunks->count() . " ({$chunk->count()} imágenes)");
+
+                // ✅ OPTIMIZADO: Pre-generar solo las imágenes de este chunk
                 $analyzedImages = $this->preGenerateAnalyzedImages($chunk, $tempDir, $reportGeneration);
 
                 // Generar PDF parcial
@@ -148,14 +202,25 @@ class GenerateReportJob implements ShouldQueue
                 );
 
                 $pdfPaths[] = $partialPdfPath;
+                $totalProcessed += $chunk->count();
+
+                // ✅ Actualizar progreso
+                $reportGeneration->update(['processed_images' => $totalProcessed]);
+
+                // ✅ Limpiar imágenes analizadas temporales de este chunk
+                foreach ($analyzedImages as $path) {
+                    if (file_exists($path)) {
+                        @unlink($path);
+                    }
+                }
+
+                Log::info("✅ Parte " . ($index + 1) . " completada. Progreso: {$totalProcessed}/{$allImages->count()}");
             }
 
             // Mover archivos a storage final
-            if (count($pdfPaths) === 1) {
-                $finalPath = $this->moveToFinalStorage($pdfPaths[0], $project);
-            } else {
-                $finalPath = $this->moveMultipleToFinalStorage($pdfPaths, $project);
-            }
+            $finalPath = count($pdfPaths) === 1 ?
+                $this->moveToFinalStorage($pdfPaths[0], $project) :
+                $this->moveMultipleToFinalStorage($pdfPaths, $project);
 
             $reportGeneration->update(['file_path' => $finalPath]);
 
@@ -177,35 +242,39 @@ class GenerateReportJob implements ShouldQueue
         $processed = 0;
 
         foreach ($images as $image) {
-            if (!$image->processedImage) continue;
+            if (!$image->processedImage || !$image->processedImage->ai_response_json) {
+                continue;
+            }
 
             try {
-                // ✅ NUEVO: Usar la misma lógica que GenerateDownloadZipJob
                 $analyzedContent = $this->generateAnalyzedImageContent($image->processedImage);
 
                 if ($analyzedContent) {
-                    // Guardar el contenido en un archivo temporal
-                    $analyzedPath = $tempDir . '/analyzed_' . uniqid() . '.jpg';
+                    $analyzedPath = $tempDir . '/analyzed_' . $image->id . '.jpg';
                     file_put_contents($analyzedPath, $analyzedContent);
                     $analyzedImages[$image->id] = $analyzedPath;
                 }
 
             } catch (\Exception $e) {
                 Log::warning("Error generando imagen analizada para imagen {$image->id}: " . $e->getMessage());
+                continue;
             }
 
             $processed++;
-            $reportGeneration->increment('processed_images');
-            $reportGeneration->refresh();
 
-            // Liberar memoria cada 10 imágenes
-            if ($processed % 10 === 0) {
+            // ✅ Liberar memoria cada 5 imágenes (más frecuente)
+            if ($processed % 5 === 0) {
                 $this->freeMemory();
+
+                $memoryMB = memory_get_usage(true) / 1024 / 1024;
+                Log::info("🧠 Memoria después de {$processed} imágenes: {$memoryMB}MB");
             }
         }
 
+        Log::info("📊 Generadas {$processed} imágenes analizadas de " . $images->count() . " imágenes en el chunk");
         return $analyzedImages;
     }
+
 
     /**
      * 🆕 NUEVO: Usar EXACTAMENTE la misma lógica que GenerateDownloadZipJob
@@ -349,6 +418,11 @@ class GenerateReportJob implements ShouldQueue
     {
         if (function_exists('gc_collect_cycles')) {
             gc_collect_cycles();
+        }
+
+        // ✅ Liberar memoria de Intervention Image si es posible
+        if (class_exists('\Intervention\Image\ImageManager')) {
+            // Forzar limpieza de caché interno de Intervention
         }
     }
 
@@ -514,7 +588,12 @@ class GenerateReportJob implements ShouldQueue
 
     public function failed(\Throwable $exception): void
     {
-        Log::error("❌ GenerateReportJob failed: " . $exception->getMessage());
+        Log::error("❌ GenerateReportJob FAILED para proyecto {$this->projectId}", [
+            'error' => $exception->getMessage(),
+            'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB',
+            'timeout' => $this->timeout,
+            'attempts' => $this->attempts()
+        ]);
 
         if ($reportGeneration = ReportGeneration::where('project_id', $this->projectId)->latest()->first()) {
             $reportGeneration->update([

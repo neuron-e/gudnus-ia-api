@@ -89,7 +89,7 @@ return [
         'redis:analysis' => 120,
         'redis:zip-analysis' => 300,
         'redis:downloads' => 1200,   // ✅ 20 minutos (era 10) - para proyectos grandes
-        'redis:reports' => 1200,
+        'redis:reports' => 2400,
     ],
 
     /*
@@ -286,13 +286,13 @@ return [
                 'balance' => 'auto',
                 'autoScalingStrategy' => 'time',
                 'minProcesses' => 1,
-                'maxProcesses' => 2,
-                'tries' => 1,
-                'timeout' => 3600, // 1 hora
-                'memory' => 1024, // 1GB para PDFs grandes
+                'maxProcesses' => 2,        // Máximo 2 reportes simultáneos
+                'tries' => 1,               // ✅ Solo 1 intento (era 2)
+                'timeout' => 14400,         // ✅ 4 horas (era 1 hora)
+                'memory' => 2048,           // ✅ 2GB memoria (era 1GB)
                 'sleep' => 10,
-                'maxJobs' => 5,
-                'rest' => 600, // 10 minutos de descanso
+                'maxJobs' => 3,             // ✅ Menos jobs antes de restart
+                'rest' => 1200,             // ✅ 20 minutos descanso (era 10)
             ],
 
             // ✅ Cola para tareas muy pesadas (batch completos)
