@@ -502,15 +502,104 @@ class GenerateReportJob implements ShouldQueue
         }
     }
 
-    // ✅ Métodos existentes que necesitas implementar
+    /**
+     * ✅ Cargar estructura del proyecto con jerarquía de carpetas
+     */
     private function loadProjectStructure($project): void
     {
-        // Tu lógica existente
+        // Cargar solo las carpetas raíz (parent_id = null) con relaciones necesarias
+        $rootFolders = \App\Models\Folder::where('project_id', $project->id)
+            ->whereNull('parent_id')
+            ->with(['images.processedImage', 'images.analysisResult'])
+            ->get();
+
+        if ($rootFolders->count() > 0) {
+            $project->children = $rootFolders;
+
+            // Cargar hijos recursivamente para cada carpeta raíz
+            foreach ($rootFolders as $folder) {
+                $this->loadChildrenRecursive($folder);
+            }
+        } else {
+            $project->children = collect([]);
+        }
     }
 
-    private function collectAllImages($project)
+    /**
+     * ✅ Cargar recursivamente los hijos de una carpeta
+     */
+    private function loadChildrenRecursive($folder, $parentPath = ''): void
     {
-        // Tu lógica existente para obtener imágenes
-        return collect();
+        // Construir el path actual para esta carpeta
+        $currentPath = trim($parentPath . ' / ' . $folder->name, ' /');
+        $folder->full_path = $currentPath;
+
+        // Asignar el path a las imágenes de esta carpeta
+        foreach ($folder->images as $image) {
+            $filename = basename($image->original_path);
+            $image->filename = $filename;
+            $image->full_path = $currentPath . ' / ' . $filename;
+            $image->folder_path = $currentPath;
+        }
+
+        // Cargar hijos y relaciones
+        $folder->load(['children' => function ($query) {
+            $query->with(['images.processedImage', 'images.analysisResult']);
+        }]);
+
+        // Aplicar recursivamente a cada hijo
+        foreach ($folder->children as $child) {
+            $this->loadChildrenRecursive($child, $currentPath);
+        }
+    }
+
+    /**
+     * ✅ MÉTODO PRINCIPAL: Recopilar todas las imágenes del proyecto
+     */
+    private function collectAllImages($project): \Illuminate\Support\Collection
+    {
+        $allImages = collect();
+        $this->collectImagesRecursive($project->children, $allImages);
+
+        // ✅ Filtrar solo imágenes que tienen processedImage
+        return $allImages->filter(function ($img) {
+            return $img->processedImage !== null;
+        });
+    }
+
+    /**
+     * ✅ HELPER: Recopilar imágenes recursivamente de todas las carpetas
+     */
+    private function collectImagesRecursive($folders, &$allImages): void
+    {
+        foreach ($folders as $folder) {
+            // Agregar imágenes de la carpeta actual
+            if ($folder->images) {
+                foreach ($folder->images as $img) {
+                    $allImages->push($img);
+                }
+            }
+
+            // Procesar carpetas hijas recursivamente
+            if ($folder->children) {
+                $this->collectImagesRecursive($folder->children, $allImages);
+            }
+        }
+    }
+
+    public function failed(\Throwable $exception): void
+    {
+        Log::error("❌ GenerateReportJob failed: " . $exception->getMessage(), [
+            'project_id' => $this->projectId,
+            'trace' => $exception->getTraceAsString()
+        ]);
+
+        // Actualizar el estado del reporte a fallido
+        if ($reportGeneration = ReportGeneration::where('project_id', $this->projectId)->latest()->first()) {
+            $reportGeneration->update([
+                'status' => 'failed',
+                'error_message' => $exception->getMessage()
+            ]);
+        }
     }
 }
