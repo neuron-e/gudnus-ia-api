@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Aws\S3\S3Client;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
@@ -69,15 +70,33 @@ class ReportGeneration extends Model
         $filePaths = is_array($this->file_path) ? $this->file_path : [$this->file_path];
         $presignedUrls = [];
 
-        $wasabi = Storage::disk('wasabi');
-        $s3Client = $wasabi->getAdapter()->getClient();
+        try {
+            // ✅ Crear cliente S3 directamente con las credenciales de Wasabi
+            $s3Client = new S3Client([
+                'version' => 'latest',
+                'region' => config('filesystems.disks.wasabi.region'),
+                'endpoint' => config('filesystems.disks.wasabi.endpoint'),
+                'use_path_style_endpoint' => true, // Importante para Wasabi
+                'credentials' => [
+                    'key' => config('filesystems.disks.wasabi.key'),
+                    'secret' => config('filesystems.disks.wasabi.secret'),
+                ],
+            ]);
 
-        foreach ($filePaths as $path) {
-            if ($wasabi->exists($path)) {
+            $bucket = config('filesystems.disks.wasabi.bucket');
+
+            foreach ($filePaths as $path) {
+                // ✅ Verificar que el archivo existe en Wasabi
+                $wasabi = Storage::disk('wasabi');
+                if (!$wasabi->exists($path)) {
+                    \Log::warning("Archivo no encontrado en Wasabi: {$path}");
+                    continue;
+                }
+
                 try {
                     // ✅ Generar URL presignada válida por X horas
                     $command = $s3Client->getCommand('GetObject', [
-                        'Bucket' => config('filesystems.disks.wasabi.bucket'),
+                        'Bucket' => $bucket,
                         'Key' => $path
                     ]);
 
@@ -98,6 +117,9 @@ class ReportGeneration extends Model
                     \Log::error("Error generando URL presignada para {$path}: " . $e->getMessage());
                 }
             }
+
+        } catch (\Exception $e) {
+            \Log::error("Error configurando cliente S3 para URLs presignadas: " . $e->getMessage());
         }
 
         return $presignedUrls;
@@ -113,6 +135,7 @@ class ReportGeneration extends Model
 
         return $urls[0] ?? null;
     }
+
 
 
     /**

@@ -572,6 +572,41 @@ class ProjectController extends Controller
         ]);
     }
 
+    /**
+     * ✅ NUEVO: URL presignada para un archivo específico
+     */
+    public function getReportFileDirectUrl(Project $project, $generationId, $fileName)
+    {
+        $generation = ReportGeneration::where('project_id', $project->id)
+            ->findOrFail($generationId);
+
+        if (!$generation->isReady()) {
+            return response()->json([
+                'error' => 'El reporte no está disponible',
+                'status' => $generation->status
+            ], 410);
+        }
+
+        try {
+            $fileUrl = $generation->getSinglePresignedUrl($fileName, 6);
+
+            if (!$fileUrl) {
+                return response()->json([
+                    'error' => 'Archivo no encontrado: ' . $fileName
+                ], 404);
+            }
+
+            return response()->json($fileUrl);
+
+        } catch (\Exception $e) {
+            \Log::error("Error generando URL presignada para archivo {$fileName}: " . $e->getMessage());
+
+            return response()->json([
+                'error' => 'Error generando enlace de descarga',
+                'fallback_url' => route('reports.download', [$generationId, $fileName])
+            ], 500);
+        }
+    }
 
     /**
      * ✅ NUEVO: Cancelar generación en proceso
