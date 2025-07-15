@@ -710,7 +710,7 @@ class ProjectController extends Controller
                 'expires_at' => $latestCompleted->expires_at,
                 'total_images' => $latestCompleted->total_images,
                 'size_info' => $this->getReportSizeInfo($latestCompleted),
-                'download_url' => route('reports.download', ['generation' => $latestCompleted->id]),
+                'download_url' => route('reports.download', ['id' => $latestCompleted->id]),
             ];
         }
 
