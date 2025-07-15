@@ -336,7 +336,7 @@ class ImageProcessingService
             ]);
 
             // ✅ Incrementar contador de batch procesado
-            if ($batchId) {
+/*            if ($batchId) {
                 $batch = \App\Models\ImageBatch::find($batchId);
                 if ($batch) {
                     $oldProcessed = $batch->processed;
@@ -344,7 +344,7 @@ class ImageProcessingService
                     $batch->touch();
                     Log::debug("📊 Batch {$batch->id}: processed {$oldProcessed} → {$batch->processed}");
                 }
-            }
+            }*/
 
             return $image;
 
