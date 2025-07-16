@@ -10,6 +10,6 @@ Route::get('/', function () {
 
 Horizon::auth(function ($request) {
     return in_array($request->ip(), [
-        '47.61.40.68',
+        '77.225.135.194',
     ]);
 });
