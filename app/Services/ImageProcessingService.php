@@ -221,6 +221,9 @@ class ImageProcessingService
     /**
      * ✅ ESTRATEGIA FALLBACK: Método mejorado
      */
+    /**
+     * ✅ ESTRATEGIA FALLBACK: Método mejorado CORREGIDO
+     */
     private function processWithImprovedFallback(Image $image, $batchId = null): Image | null
     {
         try {
@@ -241,6 +244,10 @@ class ImageProcessingService
 
             // ✅ PATHS TEMPORALES
             $tmpDir = storage_path('app/tmp');
+            if (!file_exists($tmpDir)) {
+                mkdir($tmpDir, 0755, true);
+            }
+
             $uniqueId = uniqid('improved_' . $image->id . '_', true);
             $filename = 'improved_processed_' . $uniqueId . '.jpg';
             $originalTemp = $tmpDir . '/original_' . $uniqueId . '.jpg';
@@ -250,10 +257,22 @@ class ImageProcessingService
             // ✅ Descargar imagen
             $wasabiDisk = Storage::disk('wasabi');
             $stream = $wasabiDisk->readStream($image->original_path);
+            if (!$stream) {
+                throw new \Exception('No se pudo abrir el stream desde Wasabi');
+            }
+
             $local = fopen($originalTemp, 'w+b');
+            if (!$local) {
+                throw new \Exception("No se pudo crear archivo local: $originalTemp");
+            }
+
             stream_copy_to_stream($stream, $local);
             fclose($stream);
             fclose($local);
+
+            if (!file_exists($originalTemp) || filesize($originalTemp) === 0) {
+                throw new \Exception("Archivo descargado está vacío o no existe");
+            }
 
             // ✅ EJECUTAR SCRIPT MEJORADO
             $cmd = sprintf(
@@ -268,14 +287,15 @@ class ImageProcessingService
 
             Log::debug("🔧 Ejecutando comando mejorado: {$cmd}");
 
-            $process = proc_open($cmd, [
-                0 => ["pipe", "r"],
-                1 => ["pipe", "w"],
-                2 => ["pipe", "w"]
-            ], $pipes);
+            $descriptorspec = [
+                0 => ["pipe", "r"],  // stdin
+                1 => ["pipe", "w"],  // stdout
+                2 => ["pipe", "w"]   // stderr
+            ];
 
+            $process = proc_open($cmd, $descriptorspec, $pipes);
             $start = time();
-            $timeout = 90; // Timeout más corto para fallback
+            $timeout = 90; // Timeout para fallback
 
             while (is_resource($process)) {
                 $status = proc_get_status($process);
@@ -295,6 +315,14 @@ class ImageProcessingService
             fclose($pipes[2]);
             $returnCode = proc_close($process);
 
+            Log::debug("🔧 Resultado comando mejorado:", [
+                'return_code' => $returnCode,
+                'stdout_length' => strlen($stdout),
+                'stderr_length' => strlen($stderr),
+                'output_file_exists' => file_exists($outputTemp),
+                'output_file_size' => file_exists($outputTemp) ? filesize($outputTemp) : 0
+            ]);
+
             if ($returnCode !== 0) {
                 throw new \Exception("Script mejorado falló (código: {$returnCode}) - STDERR: {$stderr}");
             }
@@ -304,24 +332,38 @@ class ImageProcessingService
             }
 
             // ✅ Subir imagen procesada
+            Log::debug("⬆️ Subiendo imagen mejorada a Wasabi...");
             $wasabiDisk->put($wasabiProcessedPath, file_get_contents($outputTemp));
+
+            if (!$wasabiDisk->exists($wasabiProcessedPath)) {
+                throw new \Exception("El archivo no existe en Wasabi después de subirlo");
+            }
+
+            Log::debug("✅ Imagen mejorada subida a Wasabi correctamente");
 
             // ✅ Cleanup
             @unlink($originalTemp);
             @unlink($outputTemp);
 
             // ✅ PARSEAR JSON del método mejorado
-            $jsonData = json_decode(trim($stdout), true);
-            if (json_last_error() !== JSON_ERROR_NONE) {
+            Log::debug("📊 Parseando output JSON del script mejorado...");
+
+            // ✅ BUSCAR JSON EN STDOUT - MISMO MÉTODO QUE YOLO
+            $jsonData = $this->extractJsonFromOutput($stdout);
+
+            if (!$jsonData) {
                 Log::warning("⚠️ No se pudo parsear JSON del método mejorado, usando valores por defecto");
                 $jsonData = [
                     'integridad' => 75.0,
                     'luminosidad' => 128.0,
-                    'uniformidad' => 50.0
+                    'uniformidad' => 50.0,
+                    'tipo_imagen' => 'Fallback'
                 ];
             }
 
-            // ✅ Guardar en BD
+            Log::debug("✅ JSON parseado del método mejorado:", $jsonData);
+
+            // ✅ Guardar en BD - IGUAL QUE YOLO
             $processed = $image->processedImage ?? new ProcessedImage();
             $processed->corrected_path = $wasabiProcessedPath;
             $image->processedImage()->save($processed);
@@ -338,6 +380,7 @@ class ImageProcessingService
             ]);
             $image->analysisResult()->save($analysis);
 
+            // ✅ CRUCIAL: Marcar como 'processed' (igual que YOLO)
             $image->update(['status' => 'processed']);
             $image->load(['processedImage', 'analysisResult']);
 
@@ -345,19 +388,17 @@ class ImageProcessingService
             return $image;
 
         } catch (\Throwable $e) {
-            $msg = "Ambos métodos fallaron para imagen {$image->id}: " . $e->getMessage();
+            $msg = "Método mejorado falló para imagen {$image->id}: " . $e->getMessage();
             Log::error("❌ " . $msg);
-            $image->update(['status' => 'error']);
-            $this->handleBatchError($batchId, $msg);
 
             // ✅ Cleanup en caso de error
             if (isset($originalTemp)) @unlink($originalTemp);
             if (isset($outputTemp)) @unlink($outputTemp);
 
-            return $image;
+            // ✅ NO marcar como error aquí, dejar que el job maneje el error
+            return null;
         }
     }
-
     /**
      * ✅ EXTRAE JSON VÁLIDO DEL OUTPUT - MÉTODO ROBUSTO
      */

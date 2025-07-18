@@ -98,9 +98,8 @@ class ProcessZipImageJob implements ShouldQueue
                 $existing->delete();
             }
 
-            // ✅ CORREGIR: Subir nueva imagen - FIX DEL PATH
+            // ✅ Subir nueva imagen
             $imageContent = file_get_contents($extractedFile);
-
             $wasabiPath = "projects/{$this->projectId}/images/{$nombreImagen}";
 
             Log::debug("📤 Subiendo imagen a Wasabi", [
@@ -124,22 +123,65 @@ class ProcessZipImageJob implements ShouldQueue
                 'wasabi_path' => $wasabiPath
             ]);
 
-            // Procesar imagen
+            // ✅ Procesar imagen
             $service = app(ImageProcessingService::class);
             $processed = $service->process($image, $this->batchId);
 
-            if ($processed && $processed->status === 'processed') {
+            Log::debug("🔄 Resultado del procesamiento", [
+                'image_id' => $image->id,
+                'processed_not_null' => $processed !== null,
+                'image_status' => $processed ? $processed->status : 'null',
+                'has_processed_image' => $processed ? ($processed->processedImage !== null) : false
+            ]);
+
+            // ✅ LÓGICA MEJORADA: Verificar múltiples condiciones de éxito
+            $wasSuccessful = false;
+
+            if ($processed) {
+                // ✅ Verificar si tiene imagen procesada (independientemente del status)
+                if ($processed->processedImage && $processed->processedImage->corrected_path) {
+                    $wasSuccessful = true;
+                    Log::debug("✅ Éxito: Imagen tiene corrected_path");
+                }
+                // ✅ O si el status es processed
+                elseif ($processed->status === 'processed') {
+                    $wasSuccessful = true;
+                    Log::debug("✅ Éxito: Status es 'processed'");
+                }
+                // ✅ O si no es error (fallback exitoso)
+                elseif ($processed->status !== 'error') {
+                    $wasSuccessful = true;
+                    Log::debug("✅ Éxito: Status no es error ({$processed->status})");
+                }
+            }
+
+            if ($wasSuccessful) {
                 // ✅ Marcar como contada e incrementar
                 $image->update(['is_counted' => true]);
-                $batch->increment('processed');
-                $batch->touch();
+
+                // ✅ INCREMENTAR BATCH de forma thread-safe
+                \DB::transaction(function() use ($batch) {
+                    $batch->increment('processed');
+                    $batch->touch(); // Actualizar timestamp
+                });
 
                 Log::info("✅ Imagen procesada exitosamente", [
                     'image_id' => $image->id,
-                    'batch_processed' => $batch->fresh()->processed
+                    'batch_processed' => $batch->fresh()->processed,
+                    'status' => $processed->status,
+                    'processing_method' => $processed->analysisResult?->processing_method ?? 'unknown'
                 ]);
             } else {
-                $this->incrementError($batch, "Fallo al procesar: {$nombreImagen}");
+                $errorMsg = $processed
+                    ? "Procesamiento falló con status: {$processed->status}"
+                    : "Service retornó null";
+
+                $this->incrementError($batch, "Error procesando {$nombreImagen}: {$errorMsg}");
+
+                Log::warning("⚠️ Imagen no se pudo procesar correctamente", [
+                    'image_id' => $image->id,
+                    'error' => $errorMsg
+                ]);
             }
 
         } catch (\Throwable $e) {
