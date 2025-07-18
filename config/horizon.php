@@ -224,12 +224,12 @@ return [
                 'queue' => ['images'],
                 'balance' => 'auto',
                 'autoScalingStrategy' => 'size',
-                'minProcesses' => 3,
-                'maxProcesses' => 10, // ✅ Más workers para 2000 imágenes
+                'minProcesses' => 2,
+                'maxProcesses' => 5, // ✅ Más workers para 2000 imágenes
                 'tries' => 3,
                 'timeout' => 900,    // 15 minutos por imagen
                 'memory' => 512,
-                'sleep' => 2,
+                'sleep' => 5,
                 'maxJobs' => 50,     // Restart más frecuente para liberar memoria
                 'rest' => 15,
             ],
