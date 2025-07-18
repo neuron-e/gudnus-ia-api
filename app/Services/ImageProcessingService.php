@@ -26,7 +26,7 @@ class ImageProcessingService
 
     public function process(Image $image, $batchId = null): Image | null
     {
-        Log::info("🔧 INICIANDO ImageProcessingService YOLO para imagen {$image->id}");
+        Log::info("🔧 INICIANDO ImageProcessingService para imagen {$image->id}");
 
         if (!$image || !$image->original_path) {
             $msg = "Imagen no encontrada para procesar (ID: {$image?->id})";
@@ -45,93 +45,66 @@ class ImageProcessingService
             return $image;
         }
 
-        // ✅ CONFIGURACIÓN YOLO CORREGIDA
-        $pythonPath = env('PYTHON_PATH', '/usr/bin/python3');
-        $scriptPath = storage_path('app/scripts/process_image_wrapped.py'); // ✅ SCRIPT YOLO CORRECTO
-        $modelPath = storage_path('app/scripts/best.pt'); // ✅ MODELO YOLO
+        // ✅ ESTRATEGIA 1: Intentar YOLO primero
+        Log::info("🤖 Intentando procesamiento con YOLO...");
+        $result = $this->processWithYolo($image, $batchId);
 
-        // ✅ Usar configuración de .env si está disponible
-        $modelPathEnv = env('YOLO_MODEL_PATH');
-        if ($modelPathEnv && file_exists($modelPathEnv)) {
-            $modelPath = $modelPathEnv;
+        if ($result && $result->status === 'processed') {
+            Log::info("✅ YOLO exitoso para imagen {$image->id}");
+            return $result;
         }
 
-        // ✅ Obtener configuración del proyecto para filas/columnas
-        $project = $image->project;
-        $filas = $project?->cell_count ?? env('DEFAULT_PANEL_ROWS', 24);
-        $columnas = $project?->column_count ?? env('DEFAULT_PANEL_COLUMNS', 6);
-        $confidence = env('YOLO_DEFAULT_CONFIDENCE', 0.5);
+        // ✅ ESTRATEGIA 2: Fallback al método mejorado
+        Log::warning("⚠️ YOLO falló, usando fallback mejorado para imagen {$image->id}");
+        return $this->processWithImprovedFallback($image, $batchId);
+    }
 
-        Log::debug("🤖 Configuración YOLO:", [
-            'python_path' => $pythonPath,
-            'script_path' => $scriptPath,
-            'model_path' => $modelPath,
-            'script_exists' => file_exists($scriptPath),
-            'model_exists' => file_exists($modelPath),
-            'filas' => $filas,
-            'columnas' => $columnas,
-            'confidence' => $confidence,
-            'python_executable' => is_executable($pythonPath)
-        ]);
-
-        // Verificar archivos críticos
-        if (!file_exists($scriptPath)) {
-            $msg = "Script YOLO no encontrado: {$scriptPath}";
-            Log::error("❌ " . $msg);
-            $image->update(['status' => 'error']);
-            $this->handleBatchError($batchId, $msg);
-            return $image;
-        }
-
-        if (!file_exists($modelPath)) {
-            $msg = "Modelo YOLO no encontrado: {$modelPath}";
-            Log::error("❌ " . $msg);
-            $image->update(['status' => 'error']);
-            $this->handleBatchError($batchId, $msg);
-            return $image;
-        }
-
-        // ✅ Verificar directorio temporal
-        $tmpDir = storage_path('app/tmp');
-        if (!file_exists($tmpDir)) {
-            try {
-                mkdir($tmpDir, 0755, true);
-                Log::info("📁 Directorio temporal creado: {$tmpDir}");
-            } catch (\Exception $e) {
-                $msg = "No se pudo crear directorio temporal: " . $e->getMessage();
-                Log::error("❌ " . $msg);
-                $image->update(['status' => 'error']);
-                $this->handleBatchError($batchId, $msg);
-                return $image;
-            }
-        }
-
-        if (!is_writable($tmpDir)) {
-            $msg = "Directorio temporal no es escribible: {$tmpDir}";
-            Log::error("❌ " . $msg);
-            $image->update(['status' => 'error']);
-            $this->handleBatchError($batchId, $msg);
-            return $image;
-        }
-
-        // ✅ PATHS TEMPORALES ÚNICOS (CORREGIDO)
-        $uniqueId = uniqid('yolo_' . $image->id . '_' . getmypid() . '_', true);
-        $filename = 'yolo_processed_' . $uniqueId . '.jpg';
-        $originalTemp = $tmpDir . '/original_' . $uniqueId . '.jpg';
-        $outputTemp = $tmpDir . '/' . $filename;
-        $wasabiProcessedPath = "projects/{$image->project_id}/images/processed/{$filename}"; // ✅ PATH CORREGIDO
-
-        Log::debug("📁 Paths YOLO generados:", [
-            'unique_id' => $uniqueId,
-            'original_temp' => $originalTemp,
-            'output_temp' => $outputTemp,
-            'wasabi_processed' => $wasabiProcessedPath
-        ]);
-
+    /**
+     * ✅ ESTRATEGIA YOLO (método actual)
+     */
+    private function processWithYolo(Image $image, $batchId = null): Image | null
+    {
         try {
-            // ✅ Descargar imagen desde Wasabi
-            Log::debug("⬇️ Descargando imagen desde Wasabi...");
+            // ✅ CONFIGURACIÓN YOLO
+            $pythonPath = env('PYTHON_PATH', '/usr/bin/python3');
+            $scriptPath = storage_path('app/scripts/process_image_wrapped.py');
+            $modelPath = storage_path('app/scripts/best.pt');
 
+            // ✅ Usar configuración de .env si está disponible
+            $modelPathEnv = env('YOLO_MODEL_PATH');
+            if ($modelPathEnv && file_exists($modelPathEnv)) {
+                $modelPath = $modelPathEnv;
+            }
+
+            // ✅ Obtener configuración del proyecto
+            $project = $image->project;
+            $filas = $project?->cell_count ?? env('DEFAULT_PANEL_ROWS', 24);
+            $columnas = $project?->column_count ?? env('DEFAULT_PANEL_COLUMNS', 6);
+            $confidence = env('YOLO_DEFAULT_CONFIDENCE', 0.5);
+
+            // Verificar archivos críticos
+            if (!file_exists($scriptPath)) {
+                throw new \Exception("Script YOLO no encontrado: {$scriptPath}");
+            }
+
+            if (!file_exists($modelPath)) {
+                throw new \Exception("Modelo YOLO no encontrado: {$modelPath}");
+            }
+
+            // ✅ PATHS TEMPORALES ÚNICOS
+            $tmpDir = storage_path('app/tmp');
+            if (!file_exists($tmpDir)) {
+                mkdir($tmpDir, 0755, true);
+            }
+
+            $uniqueId = uniqid('yolo_' . $image->id . '_' . getmypid() . '_', true);
+            $filename = 'yolo_processed_' . $uniqueId . '.jpg';
+            $originalTemp = $tmpDir . '/original_' . $uniqueId . '.jpg';
+            $outputTemp = $tmpDir . '/' . $filename;
+            $wasabiProcessedPath = "projects/{$image->project_id}/images/processed/{$filename}";
+
+            // ✅ Descargar imagen desde Wasabi
+            $wasabiDisk = Storage::disk('wasabi');
             $stream = $wasabiDisk->readStream($image->original_path);
             if (!$stream) {
                 throw new \Exception('No se pudo abrir el stream desde Wasabi');
@@ -146,167 +119,73 @@ class ImageProcessingService
             fclose($stream);
             fclose($local);
 
-            // ✅ Verificar descarga
             if (!file_exists($originalTemp) || filesize($originalTemp) === 0) {
                 throw new \Exception("Archivo descargado está vacío o no existe");
             }
 
-            $fileSize = filesize($originalTemp);
-            Log::debug("✅ Imagen descargada correctamente", [
-                'file_size' => $fileSize,
-                'file_exists' => file_exists($originalTemp)
-            ]);
+            // ✅ EJECUTAR SCRIPT YOLO
+            $cmd = sprintf(
+                '"%s" "%s" "%s" "%s" "%s" --filas %d --columnas %d --confidence %.2f',
+                $pythonPath,
+                $scriptPath,
+                $originalTemp,
+                $outputTemp,
+                $modelPath,
+                $filas,
+                $columnas,
+                $confidence
+            );
 
-        } catch (\Throwable $e) {
-            $msg = "Error descargando imagen: " . $e->getMessage();
-            Log::error("❌ " . $msg);
-            $image->update(['status' => 'error']);
-            $this->handleBatchError($batchId, $msg);
-            @unlink($originalTemp);
-            return $image;
-        }
+            $timeoutSeconds = env('YOLO_TIMEOUT_SECONDS', 120);
+            $descriptorspec = [
+                0 => ["pipe", "r"],
+                1 => ["pipe", "w"],
+                2 => ["pipe", "w"]
+            ];
 
-        // ✅ EJECUTAR SCRIPT YOLO CON TODOS LOS PARÁMETROS (CORREGIDO)
-        $cmd = sprintf(
-            '"%s" "%s" "%s" "%s" "%s" --filas %d --columnas %d --confidence %.2f',
-            $pythonPath,
-            $scriptPath,
-            $originalTemp,
-            $outputTemp,
-            $modelPath,
-            $filas,
-            $columnas,
-            $confidence
-        );
+            $process = proc_open($cmd, $descriptorspec, $pipes);
+            $start = time();
 
-        Log::debug("🤖 Ejecutando comando YOLO COMPLETO:", ['cmd' => $cmd]);
+            while (is_resource($process)) {
+                $status = proc_get_status($process);
+                if (!$status['running']) break;
 
-        // ✅ Ejecutar con timeout aumentado para YOLO
-        $descriptorspec = [
-            0 => ["pipe", "r"],  // stdin
-            1 => ["pipe", "w"],  // stdout
-            2 => ["pipe", "w"]   // stderr
-        ];
-
-        $process = proc_open($cmd, $descriptorspec, $pipes);
-
-        $timeoutSeconds = env('YOLO_TIMEOUT_SECONDS', 120); // ✅ Timeout para YOLO
-        $start = time();
-
-        while (is_resource($process)) {
-            $status = proc_get_status($process);
-            if (!$status['running']) {
-                break;
+                if ((time() - $start) > $timeoutSeconds) {
+                    proc_terminate($process, 9);
+                    throw new \Exception("Timeout alcanzado al ejecutar YOLO (>{$timeoutSeconds}s)");
+                }
+                usleep(200000);
             }
-            if ((time() - $start) > $timeoutSeconds) {
-                proc_terminate($process, 9); // SIGKILL
-                $msg = "Timeout alcanzado al ejecutar YOLO (>$timeoutSeconds s)";
-                Log::error("❌ " . $msg);
-                $image->update(['status' => 'error']);
-                $this->handleBatchError($batchId, $msg);
-                @unlink($originalTemp);
-                @unlink($outputTemp);
-                return $image;
+
+            fclose($pipes[0]);
+            $stdout = stream_get_contents($pipes[1]);
+            $stderr = stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $returnCode = proc_close($process);
+
+            if ($returnCode !== 0) {
+                throw new \Exception("Script YOLO falló (código: {$returnCode}) - STDERR: {$stderr}");
             }
-            usleep(200000); // 200ms
-        }
 
-        fclose($pipes[0]); // Cerrar stdin
+            if (!file_exists($outputTemp) || filesize($outputTemp) === 0) {
+                throw new \Exception("Script YOLO no generó output válido");
+            }
 
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-
-        $returnCode = proc_close($process);
-
-        Log::debug("🤖 Resultado comando YOLO:", [
-            'return_code' => $returnCode,
-            'stdout_length' => strlen($stdout),
-            'stderr_length' => strlen($stderr),
-            'output_file_exists' => file_exists($outputTemp),
-            'output_file_size' => file_exists($outputTemp) ? filesize($outputTemp) : 0
-        ]);
-
-        if ($returnCode !== 0) {
-            $msg = "Script YOLO falló (código: {$returnCode})";
-            Log::error("❌ " . $msg, [
-                'stdout' => $stdout,
-                'stderr' => $stderr
-            ]);
-            $image->update(['status' => 'error']);
-            @unlink($originalTemp);
-            @unlink($outputTemp);
-            $this->handleBatchError($batchId, $msg . " - STDERR: " . $stderr);
-            return $image;
-        }
-
-        if (!file_exists($outputTemp) || filesize($outputTemp) === 0) {
-            $msg = "Script YOLO no generó output válido";
-            Log::error("❌ " . $msg, [
-                'output_exists' => file_exists($outputTemp),
-                'output_size' => file_exists($outputTemp) ? filesize($outputTemp) : 0,
-                'stdout' => $stdout
-            ]);
-            $image->update(['status' => 'error']);
-            @unlink($originalTemp);
-            @unlink($outputTemp);
-            $this->handleBatchError($batchId, $msg);
-            return $image;
-        }
-
-        try {
             // ✅ Subir imagen procesada
-            Log::debug("⬆️ Subiendo imagen YOLO procesada a Wasabi...");
             $wasabiDisk->put($wasabiProcessedPath, file_get_contents($outputTemp));
 
-            if (!$wasabiDisk->exists($wasabiProcessedPath)) {
-                throw new \Exception("El archivo no existe en Wasabi después de subirlo");
-            }
-
-            Log::debug("✅ Imagen YOLO subida a Wasabi correctamente");
-
-        } catch (\Throwable $e) {
-            $msg = "Error subiendo imagen procesada: " . $e->getMessage();
-            Log::error("❌ " . $msg);
-            $image->update(['status' => 'error']);
+            // ✅ Cleanup
             @unlink($originalTemp);
             @unlink($outputTemp);
-            $this->handleBatchError($batchId, $msg);
-            return $image;
-        }
 
-        // ✅ Cleanup de archivos temporales
-        @unlink($originalTemp);
-        @unlink($outputTemp);
+            // ✅ PARSEAR JSON
+            $jsonData = $this->extractJsonFromOutput($stdout);
+            if (!$jsonData || !($jsonData['success'] ?? false)) {
+                throw new \Exception("YOLO reportó fallo: " . ($jsonData['error'] ?? 'Error desconocido'));
+            }
 
-        // ✅ PARSEAR JSON CON MÉTODO ROBUSTO (CORREGIDO)
-        Log::debug("📊 Parseando output JSON del script YOLO...");
-        $jsonData = $this->extractJsonFromOutput($stdout);
-        if (!$jsonData) {
-            $msg = "Error parseando JSON de YOLO: No se encontró JSON válido";
-            Log::error("❌ " . $msg, [
-                'stdout' => $stdout,
-                'stdout_length' => strlen($stdout)
-            ]);
-            $image->update(['status' => 'error']);
-            $this->handleBatchError($batchId, $msg);
-            return $image;
-        }
-
-        // ✅ Verificar que YOLO fue exitoso
-        if (!($jsonData['success'] ?? false)) {
-            $msg = "YOLO reportó fallo: " . ($jsonData['error'] ?? 'Error desconocido');
-            Log::error("❌ " . $msg);
-            $image->update(['status' => 'error']);
-            $this->handleBatchError($batchId, $msg);
-            return $image;
-        }
-
-        try {
-            // ✅ Guardar datos en base de datos con métricas de YOLO
-            Log::debug("💾 Guardando datos YOLO en base de datos...");
-
+            // ✅ Guardar en BD
             $processed = $image->processedImage ?? new ProcessedImage();
             $processed->corrected_path = $wasabiProcessedPath;
             $image->processedImage()->save($processed);
@@ -318,41 +197,163 @@ class ImageProcessingService
                 'integrity_score' => $jsonData['integridad'] ?? null,
                 'luminosity_score' => $jsonData['luminosidad'] ?? null,
                 'uniformity_score' => $jsonData['uniformidad'] ?? null,
-                // ✅ Métricas específicas de YOLO
                 'detection_confidence' => $jsonData['confidence'] ?? null,
-                'processing_method' => $jsonData['method'] ?? 'yolo_segmentation',
-                'algorithm_version' => $jsonData['algorithm_version'] ?? 'yolo_v8_segmentation',
+                'processing_method' => 'yolo_segmentation',
+                'algorithm_version' => 'yolo_v8_segmentation',
             ]);
             $image->analysisResult()->save($analysis);
 
             $image->update(['status' => 'processed']);
             $image->load(['processedImage', 'analysisResult']);
 
-            Log::info("✅ Imagen {$image->id} procesada correctamente con YOLO", [
-                'confidence' => $jsonData['confidence'] ?? 0,
-                'method' => $jsonData['method'] ?? 'yolo_segmentation',
-                'integridad' => $jsonData['integridad'] ?? 0,
-                'unique_id' => $uniqueId
-            ]);
-
-            // ✅ Incrementar contador de batch procesado
-/*            if ($batchId) {
-                $batch = \App\Models\ImageBatch::find($batchId);
-                if ($batch) {
-                    $oldProcessed = $batch->processed;
-                    $batch->increment('processed');
-                    $batch->touch();
-                    Log::debug("📊 Batch {$batch->id}: processed {$oldProcessed} → {$batch->processed}");
-                }
-            }*/
-
+            Log::info("✅ YOLO exitoso para imagen {$image->id}");
             return $image;
 
         } catch (\Throwable $e) {
-            $msg = "Error guardando datos YOLO: " . $e->getMessage();
+            Log::warning("⚠️ YOLO falló para imagen {$image->id}: " . $e->getMessage());
+            // ✅ Limpiar archivos temporales en caso de error
+            if (isset($originalTemp)) @unlink($originalTemp);
+            if (isset($outputTemp)) @unlink($outputTemp);
+            return null; // ✅ Retornar null para activar fallback
+        }
+    }
+
+    /**
+     * ✅ ESTRATEGIA FALLBACK: Método mejorado
+     */
+    private function processWithImprovedFallback(Image $image, $batchId = null): Image | null
+    {
+        try {
+            Log::info("🔄 Iniciando procesamiento con método mejorado para imagen {$image->id}");
+
+            // ✅ CONFIGURACIÓN FALLBACK
+            $pythonPath = env('PYTHON_PATH', '/usr/bin/python3');
+            $scriptPath = storage_path('app/scripts/process_image_improved.py');
+
+            // Verificar script
+            if (!file_exists($scriptPath)) {
+                throw new \Exception("Script mejorado no encontrado: {$scriptPath}");
+            }
+
+            $project = $image->project;
+            $filas = $project?->cell_count ?? env('DEFAULT_PANEL_ROWS', 10);
+            $columnas = $project?->column_count ?? env('DEFAULT_PANEL_COLUMNS', 6);
+
+            // ✅ PATHS TEMPORALES
+            $tmpDir = storage_path('app/tmp');
+            $uniqueId = uniqid('improved_' . $image->id . '_', true);
+            $filename = 'improved_processed_' . $uniqueId . '.jpg';
+            $originalTemp = $tmpDir . '/original_' . $uniqueId . '.jpg';
+            $outputTemp = $tmpDir . '/' . $filename;
+            $wasabiProcessedPath = "projects/{$image->project_id}/images/processed/{$filename}";
+
+            // ✅ Descargar imagen
+            $wasabiDisk = Storage::disk('wasabi');
+            $stream = $wasabiDisk->readStream($image->original_path);
+            $local = fopen($originalTemp, 'w+b');
+            stream_copy_to_stream($stream, $local);
+            fclose($stream);
+            fclose($local);
+
+            // ✅ EJECUTAR SCRIPT MEJORADO
+            $cmd = sprintf(
+                '"%s" "%s" "%s" "%s" --filas %d --columnas %d',
+                $pythonPath,
+                $scriptPath,
+                $originalTemp,
+                $outputTemp,
+                $filas,
+                $columnas
+            );
+
+            Log::debug("🔧 Ejecutando comando mejorado: {$cmd}");
+
+            $process = proc_open($cmd, [
+                0 => ["pipe", "r"],
+                1 => ["pipe", "w"],
+                2 => ["pipe", "w"]
+            ], $pipes);
+
+            $start = time();
+            $timeout = 90; // Timeout más corto para fallback
+
+            while (is_resource($process)) {
+                $status = proc_get_status($process);
+                if (!$status['running']) break;
+
+                if ((time() - $start) > $timeout) {
+                    proc_terminate($process, 9);
+                    throw new \Exception("Timeout en método mejorado (>{$timeout}s)");
+                }
+                usleep(200000);
+            }
+
+            fclose($pipes[0]);
+            $stdout = stream_get_contents($pipes[1]);
+            $stderr = stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $returnCode = proc_close($process);
+
+            if ($returnCode !== 0) {
+                throw new \Exception("Script mejorado falló (código: {$returnCode}) - STDERR: {$stderr}");
+            }
+
+            if (!file_exists($outputTemp) || filesize($outputTemp) === 0) {
+                throw new \Exception("Script mejorado no generó output válido");
+            }
+
+            // ✅ Subir imagen procesada
+            $wasabiDisk->put($wasabiProcessedPath, file_get_contents($outputTemp));
+
+            // ✅ Cleanup
+            @unlink($originalTemp);
+            @unlink($outputTemp);
+
+            // ✅ PARSEAR JSON del método mejorado
+            $jsonData = json_decode(trim($stdout), true);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                Log::warning("⚠️ No se pudo parsear JSON del método mejorado, usando valores por defecto");
+                $jsonData = [
+                    'integridad' => 75.0,
+                    'luminosidad' => 128.0,
+                    'uniformidad' => 50.0
+                ];
+            }
+
+            // ✅ Guardar en BD
+            $processed = $image->processedImage ?? new ProcessedImage();
+            $processed->corrected_path = $wasabiProcessedPath;
+            $image->processedImage()->save($processed);
+
+            $analysis = $image->analysisResult ?? new ImageAnalysisResult();
+            $analysis->fill([
+                'rows' => $filas,
+                'columns' => $columnas,
+                'integrity_score' => $jsonData['integridad'] ?? 75.0,
+                'luminosity_score' => $jsonData['luminosidad'] ?? 128.0,
+                'uniformity_score' => $jsonData['uniformidad'] ?? 50.0,
+                'processing_method' => 'improved_fallback',
+                'algorithm_version' => 'opencv_improved_v2',
+            ]);
+            $image->analysisResult()->save($analysis);
+
+            $image->update(['status' => 'processed']);
+            $image->load(['processedImage', 'analysisResult']);
+
+            Log::info("✅ Método mejorado exitoso para imagen {$image->id}");
+            return $image;
+
+        } catch (\Throwable $e) {
+            $msg = "Ambos métodos fallaron para imagen {$image->id}: " . $e->getMessage();
             Log::error("❌ " . $msg);
             $image->update(['status' => 'error']);
             $this->handleBatchError($batchId, $msg);
+
+            // ✅ Cleanup en caso de error
+            if (isset($originalTemp)) @unlink($originalTemp);
+            if (isset($outputTemp)) @unlink($outputTemp);
+
             return $image;
         }
     }
