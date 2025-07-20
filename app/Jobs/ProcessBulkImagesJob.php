@@ -52,7 +52,6 @@ class ProcessBulkImagesJob implements ShouldQueue
             $delay = $index * 2; // 2 segundos entre cada job
 
             ProcessImageImmediatelyJob::dispatch($imageId, $this->batchId)
-                ->delay(now()->addSeconds($delay))
                 ->onQueue('analysis');
         }
 
