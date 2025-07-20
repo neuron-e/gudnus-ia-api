@@ -121,8 +121,10 @@ Route::prefix('projects/{project}')->group(function () {
     Route::post('/retry-pending-analysis', [UnifiedBatchController::class, 'legacyRetryPendingAnalysis'])
         ->name('batches.legacy.retry-analysis');
 
-    Route::post('/force-clean', [UnifiedBatchController::class, 'legacyForceCleanProject'])
-        ->name('batches.legacy.force-clean');
+/*    Route::post('/force-clean', [UnifiedBatchController::class, 'legacyForceCleanProject'])
+        ->name('batches.legacy.force-clean');*/
+    Route::post('/force-clean', [AnalysisBatchController::class, 'forceCleanProject']); // ✅ NUEVO
+
 });
 
 Route::get('/unified-batches/diagnostic', [UnifiedBatchController::class, 'systemDiagnostic']);
