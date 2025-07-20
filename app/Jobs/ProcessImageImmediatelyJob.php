@@ -13,7 +13,8 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
-use Intervention\Image\Facades\Image as InterventionImage;
+use Intervention\Image\ImageManager;
+use Intervention\Image\Drivers\Gd\Driver as GdDriver;
 
 class ProcessImageImmediatelyJob implements ShouldQueue
 {
@@ -108,7 +109,13 @@ class ProcessImageImmediatelyJob implements ShouldQueue
     private function validateImageForAzure(string $correctedPath): array
     {
         try {
-            // Obtener info del archivo
+            if (!Storage::disk('wasabi')->exists($correctedPath)) {
+                return [
+                    'valid' => false,
+                    'error' => 'Archivo no existe en Wasabi'
+                ];
+            }
+
             $size = Storage::disk('wasabi')->size($correctedPath);
 
             return [
@@ -116,7 +123,8 @@ class ProcessImageImmediatelyJob implements ShouldQueue
                 'size' => $size,
                 'max_size' => self::AZURE_MAX_SIZE_BYTES,
                 'needs_resize' => $size > self::AZURE_MAX_SIZE_BYTES,
-                'size_mb' => round($size / 1024 / 1024, 2)
+                'size_mb' => round($size / 1024 / 1024, 2),
+                'size_formatted' => $this->formatBytes($size)
             ];
 
         } catch (\Exception $e) {
@@ -129,7 +137,7 @@ class ProcessImageImmediatelyJob implements ShouldQueue
     }
 
     /**
-     * Redimensiona la imagen si excede el límite de Azure usando Intervention Image
+     * ✅ Redimensiona la imagen usando Intervention Image v3.1 con fallback a GD
      */
     private function prepareImageForAzure(string $imageContent): string
     {
@@ -144,73 +152,95 @@ class ProcessImageImmediatelyJob implements ShouldQueue
         Log::info("🔄 Redimensionando imagen: {$this->formatBytes($currentSize)} -> objetivo: {$this->formatBytes(self::AZURE_MAX_SIZE_BYTES)}");
 
         try {
-            // Cargar imagen con Intervention Image
-            $image = InterventionImage::make($imageContent);
-            $originalWidth = $image->width();
-            $originalHeight = $image->height();
-
-            Log::debug("📏 Dimensiones originales: {$originalWidth}x{$originalHeight}");
-
-            // Calcular factor de reducción basado en el tamaño del archivo
-            $targetSize = (int)(self::AZURE_MAX_SIZE_BYTES * self::SAFETY_MARGIN);
-            $reductionFactor = sqrt($targetSize / $currentSize);
-
-            // Asegurar que no se reduzca demasiado
-            $reductionFactor = max($reductionFactor, 0.3); // Mínimo 30% del tamaño original
-
-            $newWidth = max((int)($originalWidth * $reductionFactor), self::MIN_DIMENSION);
-            $newHeight = max((int)($originalHeight * $reductionFactor), self::MIN_DIMENSION);
-
-            Log::debug("🎯 Nuevas dimensiones calculadas: {$newWidth}x{$newHeight} (factor: " . round($reductionFactor, 3) . ")");
-
-            // Redimensionar manteniendo proporción
-            $resizedImage = $image->resize($newWidth, $newHeight, function ($constraint) {
-                $constraint->aspectRatio();
-                $constraint->upsize(); // Prevenir agrandar
-            });
-
-            // Probar diferentes calidades hasta alcanzar el tamaño objetivo
-            foreach (self::DEFAULT_QUALITIES as $quality) {
-                $encoded = $resizedImage->encode('jpg', $quality)->__toString();
-                $newSize = strlen($encoded);
-
-                Log::debug("🧪 Calidad {$quality}%: {$this->formatBytes($newSize)}");
-
-                if ($newSize <= self::AZURE_MAX_SIZE_BYTES) {
-                    Log::info("✅ Imagen redimensionada exitosamente: {$this->formatBytes($currentSize)} -> {$this->formatBytes($newSize)} (calidad {$quality}%, {$newWidth}x{$newHeight})");
-                    return $encoded;
-                }
-            }
-
-            // Si aún es muy grande, reducir más agresivamente las dimensiones
-            $aggressiveWidth = max((int)($newWidth * 0.6), self::MIN_DIMENSION);
-            $aggressiveHeight = max((int)($newHeight * 0.6), self::MIN_DIMENSION);
-
-            Log::warning("⚠️ Aplicando reducción agresiva: {$aggressiveWidth}x{$aggressiveHeight}");
-
-            $finalImage = $image->resize($aggressiveWidth, $aggressiveHeight)->encode('jpg', 25);
-            $finalSize = strlen($finalImage->__toString());
-
-            if ($finalSize <= self::AZURE_MAX_SIZE_BYTES) {
-                Log::info("✅ Imagen redimensionada con reducción agresiva: {$this->formatBytes($currentSize)} -> {$this->formatBytes($finalSize)}");
-                return $finalImage->__toString();
-            }
-
-            throw new \Exception("No se pudo reducir la imagen lo suficiente. Tamaño final: {$this->formatBytes($finalSize)}");
-
+            // ✅ Primero intentar con Intervention Image v3.1
+            return $this->resizeWithIntervention($imageContent);
         } catch (\Exception $e) {
-            Log::error("❌ Error redimensionando imagen: " . $e->getMessage());
+            Log::warning("⚠️ Intervention Image falló: " . $e->getMessage());
 
-            // Fallback: intentar con GD si Intervention Image falla
-            Log::info("🔄 Intentando fallback con GD...");
-            return $this->prepareImageForAzureWithGD($imageContent);
+            try {
+                // ✅ Fallback con GD
+                return $this->resizeWithGD($imageContent);
+            } catch (\Exception $gdException) {
+                Log::error("❌ Ambos métodos de redimensionamiento fallaron");
+                throw new \Exception("No se pudo redimensionar la imagen: " . $e->getMessage() . " | GD: " . $gdException->getMessage());
+            }
         }
     }
 
     /**
-     * Método de fallback usando GD (sin dependencias externas)
+     * ✅ Método usando Intervention Image v3.1
      */
-    private function prepareImageForAzureWithGD(string $imageContent): string
+    private function resizeWithIntervention(string $imageContent): string
+    {
+        $currentSize = strlen($imageContent);
+
+        // ✅ Crear manager con driver GD para v3.1
+        $manager = new ImageManager(new GdDriver());
+        $image = $manager->read($imageContent);
+
+        $originalWidth = $image->width();
+        $originalHeight = $image->height();
+
+        Log::debug("📏 Dimensiones originales: {$originalWidth}x{$originalHeight}");
+
+        // ✅ Estrategia 1: Intentar solo compresión primero
+        foreach ([90, 80, 70, 60, 50, 40, 30] as $quality) {
+            $encoded = $image->toJpeg($quality);
+            $newSize = strlen($encoded);
+
+            if ($newSize <= self::AZURE_MAX_SIZE_BYTES) {
+                Log::info("✅ Imagen redimensionada solo con compresión: {$this->formatBytes($currentSize)} -> {$this->formatBytes($newSize)} (calidad {$quality}%)");
+                return $encoded;
+            }
+        }
+
+        // ✅ Estrategia 2: Reducir dimensiones + compresión
+        $targetSize = (int)(self::AZURE_MAX_SIZE_BYTES * self::SAFETY_MARGIN);
+        $reductionFactor = sqrt($targetSize / $currentSize);
+        $reductionFactor = max($reductionFactor, 0.3); // Mínimo 30%
+
+        $newWidth = max((int)($originalWidth * $reductionFactor), self::MIN_DIMENSION);
+        $newHeight = max((int)($originalHeight * $reductionFactor), self::MIN_DIMENSION);
+
+        Log::debug("🎯 Nuevas dimensiones calculadas: {$newWidth}x{$newHeight} (factor: " . round($reductionFactor, 3) . ")");
+
+        // ✅ Redimensionar con v3.1 syntax
+        $resizedImage = $image->resize($newWidth, $newHeight);
+
+        foreach (self::DEFAULT_QUALITIES as $quality) {
+            $encoded = $resizedImage->toJpeg($quality);
+            $newSize = strlen($encoded);
+
+            Log::debug("🧪 Calidad {$quality}%: {$this->formatBytes($newSize)}");
+
+            if ($newSize <= self::AZURE_MAX_SIZE_BYTES) {
+                Log::info("✅ Imagen redimensionada con Intervention: {$this->formatBytes($currentSize)} -> {$this->formatBytes($newSize)} (calidad {$quality}%, {$newWidth}x{$newHeight})");
+                return $encoded;
+            }
+        }
+
+        // ✅ Si aún es muy grande, reducir más agresivamente
+        $aggressiveWidth = max((int)($newWidth * 0.6), self::MIN_DIMENSION);
+        $aggressiveHeight = max((int)($newHeight * 0.6), self::MIN_DIMENSION);
+
+        Log::warning("⚠️ Aplicando reducción agresiva: {$aggressiveWidth}x{$aggressiveHeight}");
+
+        $finalImage = $image->resize($aggressiveWidth, $aggressiveHeight);
+        $finalEncoded = $finalImage->toJpeg(25);
+        $finalSize = strlen($finalEncoded);
+
+        if ($finalSize <= self::AZURE_MAX_SIZE_BYTES) {
+            Log::info("✅ Imagen redimensionada con reducción agresiva: {$this->formatBytes($currentSize)} -> {$this->formatBytes($finalSize)}");
+            return $finalEncoded;
+        }
+
+        throw new \Exception("No se pudo reducir lo suficiente con Intervention Image. Tamaño final: {$this->formatBytes($finalSize)}");
+    }
+
+    /**
+     * ✅ Método de fallback usando GD mejorado
+     */
+    private function resizeWithGD(string $imageContent): string
     {
         $currentSize = strlen($imageContent);
 
@@ -223,32 +253,50 @@ class ProcessImageImmediatelyJob implements ShouldQueue
         try {
             $sourceImage = imagecreatefromstring($imageContent);
             if (!$sourceImage) {
-                throw new \Exception("No se pudo crear imagen desde el contenido con GD");
+                throw new \Exception("GD no pudo crear imagen desde el contenido");
             }
 
             $originalWidth = imagesx($sourceImage);
             $originalHeight = imagesy($sourceImage);
 
-            // Calcular nuevas dimensiones
+            Log::debug("📏 Imagen original GD: {$originalWidth}x{$originalHeight} ({$this->formatBytes($currentSize)})");
+
+            // ✅ ESTRATEGIA 1: Intentar solo compresión primero
+            foreach ([90, 80, 70, 60, 50, 40, 30, 20] as $quality) {
+                ob_start();
+                imagejpeg($sourceImage, null, $quality);
+                $compressed = ob_get_clean();
+                $compressedSize = strlen($compressed);
+
+                if ($compressedSize <= self::AZURE_MAX_SIZE_BYTES) {
+                    imagedestroy($sourceImage);
+                    Log::info("✅ Imagen reducida solo con compresión GD: {$this->formatBytes($currentSize)} -> {$this->formatBytes($compressedSize)} (calidad {$quality}%)");
+                    return $compressed;
+                }
+            }
+
+            // ✅ ESTRATEGIA 2: Reducir dimensiones + compresión
             $targetSize = (int)(self::AZURE_MAX_SIZE_BYTES * self::SAFETY_MARGIN);
             $reductionFactor = sqrt($targetSize / $currentSize);
-            $reductionFactor = max($reductionFactor, 0.3);
+            $reductionFactor = max($reductionFactor, 0.3); // Mínimo 30%
 
             $newWidth = max((int)($originalWidth * $reductionFactor), self::MIN_DIMENSION);
             $newHeight = max((int)($originalHeight * $reductionFactor), self::MIN_DIMENSION);
 
-            Log::debug("📏 GD: {$originalWidth}x{$originalHeight} -> {$newWidth}x{$newHeight}");
+            Log::debug("🎯 Redimensionando con GD a: {$newWidth}x{$newHeight} (factor: " . round($reductionFactor, 3) . ")");
 
-            // Crear nueva imagen
             $resizedImage = imagecreatetruecolor($newWidth, $newHeight);
 
-            // Preservar calidad
-            if (function_exists('imagealphablending')) {
+            // ✅ Configurar para mejor calidad
+            if (function_exists('imagealphablending') && function_exists('imagesavealpha')) {
                 imagealphablending($resizedImage, false);
                 imagesavealpha($resizedImage, true);
+                $transparent = imagecolorallocatealpha($resizedImage, 255, 255, 255, 127);
+                imagefill($resizedImage, 0, 0, $transparent);
+                imagealphablending($resizedImage, true);
             }
 
-            // Redimensionar
+            // ✅ Redimensionar con alta calidad
             imagecopyresampled(
                 $resizedImage, $sourceImage,
                 0, 0, 0, 0,
@@ -256,7 +304,8 @@ class ProcessImageImmediatelyJob implements ShouldQueue
                 $originalWidth, $originalHeight
             );
 
-            // Probar diferentes calidades
+            // ✅ Probar diferentes calidades hasta encontrar la correcta
+            $result = null;
             foreach (self::DEFAULT_QUALITIES as $quality) {
                 ob_start();
                 imagejpeg($resizedImage, null, $quality);
@@ -264,25 +313,25 @@ class ProcessImageImmediatelyJob implements ShouldQueue
                 $newSize = strlen($encoded);
 
                 if ($newSize <= self::AZURE_MAX_SIZE_BYTES) {
-                    Log::info("✅ Imagen redimensionada con GD: {$this->formatBytes($currentSize)} -> {$this->formatBytes($newSize)} (calidad {$quality}%)");
-
-                    // Limpiar memoria
-                    imagedestroy($sourceImage);
-                    imagedestroy($resizedImage);
-
-                    return $encoded;
+                    $result = $encoded;
+                    Log::info("✅ Imagen redimensionada con GD: {$this->formatBytes($currentSize)} -> {$this->formatBytes($newSize)} (calidad {$quality}%, {$newWidth}x{$newHeight})");
+                    break;
                 }
             }
 
-            // Limpiar memoria
+            // ✅ Limpiar memoria
             imagedestroy($sourceImage);
             imagedestroy($resizedImage);
 
-            throw new \Exception("No se pudo reducir la imagen lo suficiente con GD");
+            if (!$result) {
+                throw new \Exception("GD no pudo reducir la imagen lo suficiente. Imagen demasiado grande.");
+            }
+
+            return $result;
 
         } catch (\Exception $e) {
             Log::error("❌ Error con GD fallback: " . $e->getMessage());
-            throw new \Exception("Error en ambos métodos de redimensionamiento: " . $e->getMessage());
+            throw $e;
         }
     }
 
@@ -320,16 +369,20 @@ class ProcessImageImmediatelyJob implements ShouldQueue
             return true;
         }
 
-        // Validación previa
+        // Validación previa mejorada
         $validation = $this->validateImageForAzure($correctedPath);
 
-        if (!$validation['valid'] && isset($validation['error'])) {
-            Log::error("❌ Error validando imagen {$image->id}: " . $validation['error']);
-            return false;
+        if (!$validation['valid']) {
+            if (isset($validation['error'])) {
+                Log::error("❌ Error validando imagen {$image->id}: " . $validation['error']);
+                return false;
+            }
         }
 
         if ($validation['needs_resize']) {
-            Log::info("⚠️ Imagen {$image->id} requiere redimensionamiento: {$validation['size_mb']}MB > 4MB");
+            Log::info("⚠️ Imagen {$image->id} requiere redimensionamiento: {$validation['size_formatted']} > 4MB");
+        } else {
+            Log::info("✅ Imagen {$image->id} dentro del límite: {$validation['size_formatted']}");
         }
 
         try {
@@ -408,7 +461,7 @@ class ProcessImageImmediatelyJob implements ShouldQueue
 
         Log::error("❌ Azure prediction failed para imagen {$image->id}", [
             'status' => $statusCode,
-            'body' => $responseBody,
+            'body' => substr($responseBody, 0, 500), // ✅ Limitar tamaño del log
             'attempt' => $this->attempts()
         ]);
 
