@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\Log;
 
 class CleanupTemporaryFilesCommand extends Command
 {
-    protected $signature = 'app:cleanup-temp-files
+    protected $signature = 'cleanup:temp-files
                            {--force : Forzar limpieza sin confirmación}
                            {--dry-run : Mostrar qué se eliminaría sin hacerlo}
                            {--check-disk : Solo verificar espacio en disco}';
