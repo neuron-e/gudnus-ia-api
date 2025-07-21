@@ -41,39 +41,6 @@ class GenerateDownloadZipJob implements ShouldQueue
         return [300]; // 5 minutos entre reintentos
     }
 
-    /**
-     * ✅ OBTENER MENSAJE DE ERROR DETALLADO PARA ZIPARCHIVE
-     */
-    private function getZipErrorMessage($errorCode): string
-    {
-        return match($errorCode) {
-            \ZipArchive::ER_MULTIDISK => 'Multi-disk zip archives not supported',
-            \ZipArchive::ER_RENAME => 'Renaming temporary file failed',
-            \ZipArchive::ER_CLOSE => 'Closing zip archive failed',
-            \ZipArchive::ER_SEEK => 'Seek error',
-            \ZipArchive::ER_READ => 'Read error',
-            \ZipArchive::ER_WRITE => 'Write error',
-            \ZipArchive::ER_CRC => 'CRC error',
-            \ZipArchive::ER_ZIPCLOSED => 'Containing zip archive was closed',
-            \ZipArchive::ER_NOENT => 'No such file',
-            \ZipArchive::ER_EXISTS => 'File already exists',
-            \ZipArchive::ER_OPEN => 'Can\'t open file',
-            \ZipArchive::ER_TMPOPEN => 'Failure to create temporary file',
-            \ZipArchive::ER_ZLIB => 'Zlib error',
-            \ZipArchive::ER_MEMORY => 'Memory allocation failure',
-            \ZipArchive::ER_CHANGED => 'Entry has been changed',
-            \ZipArchive::ER_COMPNOTSUPP => 'Compression method not supported',
-            \ZipArchive::ER_EOF => 'Premature EOF',
-            \ZipArchive::ER_INVAL => 'Invalid argument',
-            \ZipArchive::ER_NOZIP => 'Not a zip archive',
-            \ZipArchive::ER_INTERNAL => 'Internal error',
-            \ZipArchive::ER_INCONS => 'Zip archive inconsistent',
-            \ZipArchive::ER_REMOVE => 'Can\'t remove file',
-            \ZipArchive::ER_DELETED => 'Entry has been deleted',
-            default => "Error desconocido: {$errorCode}"
-        };
-    }
-
     public function __construct(
         public int $projectId,
         public string $type,
@@ -104,7 +71,7 @@ class GenerateDownloadZipJob implements ShouldQueue
 
         $startTime = microtime(true);
 
-        Log::info("🚀 [FIXED] GenerateDownloadZipJob iniciado", [
+        Log::info("🚀 [FIXED-COMPRESS] GenerateDownloadZipJob iniciado", [
             'batch_id' => $this->batchId,
             'project_id' => $this->projectId,
             'type' => $this->type,
@@ -146,7 +113,7 @@ class GenerateDownloadZipJob implements ShouldQueue
             $totalImages = $images->count();
             $batch->update(['total_images' => $totalImages]);
 
-            Log::info("📊 [FIXED] Procesando {$totalImages} imágenes tipo {$this->type}");
+            Log::info("📊 [FIXED-COMPRESS] Procesando {$totalImages} imágenes tipo {$this->type}");
 
             // ✅ GENERACIÓN OPTIMIZADA CON COMPRESIÓN Y WASABI
             $wasabiPaths = $this->generateZipsWithMemoryControl($project, $images, $batch);
@@ -163,7 +130,7 @@ class GenerateDownloadZipJob implements ShouldQueue
             ]);
 
             $processingTime = round(microtime(true) - $startTime, 2);
-            Log::info("✅ [FIXED] ZIP generación completada", [
+            Log::info("✅ [FIXED-COMPRESS] ZIP generación completada", [
                 'files_generated' => count($finalPaths),
                 'total_images' => $totalImages,
                 'processing_time' => $processingTime . 's',
@@ -173,7 +140,7 @@ class GenerateDownloadZipJob implements ShouldQueue
         } catch (\Throwable $e) {
             $processingTime = round(microtime(true) - $startTime, 2);
 
-            Log::error("❌ [FIXED] Error generando ZIP", [
+            Log::error("❌ [FIXED-COMPRESS] Error generando ZIP", [
                 'batch_id' => $this->batchId,
                 'project_id' => $this->projectId,
                 'type' => $this->type,
@@ -286,7 +253,7 @@ class GenerateDownloadZipJob implements ShouldQueue
             default => 500              // ✅ Máximo para proyectos pequeños
         };
 
-        Log::info("📦 [OPTIMIZED] Usando chunks de {$maxImagesPerZip} imágenes para {$imageCount} imágenes con compresión y subida a Wasabi");
+        Log::info("📦 [OPTIMIZED-COMPRESS] Usando chunks de {$maxImagesPerZip} imágenes para {$imageCount} imágenes con compresión y subida a Wasabi");
 
         $imageChunks = $images->chunk($maxImagesPerZip);
         $wasabiPaths = []; // ✅ Cambiar a rutas de Wasabi
@@ -398,8 +365,20 @@ class GenerateDownloadZipJob implements ShouldQueue
 
                     $imageData = $wasabi->get($img->original_path);
 
+                    // ✅ VERIFICAR QUE SE DESCARGÓ CORRECTAMENTE
+                    if ($imageData === null || $imageData === false) {
+                        Log::warning("⚠️ No se pudo descargar imagen original: {$img->original_path}");
+                        continue;
+                    }
+
                     // ✅ COMPRIMIR IMAGEN SI ES NECESARIO
                     $compressedData = $this->compressImageIfNeeded($imageData, $originalExtension);
+
+                    // ✅ VERIFICAR QUE LA COMPRESIÓN FUNCIONÓ
+                    if (empty($compressedData)) {
+                        Log::warning("⚠️ Compresión falló para imagen original: {$img->id}");
+                        continue;
+                    }
 
                     $zip->addFromString("{$root}/{$folderPath}/original/{$filename}", $compressedData);
                     unset($imageData, $compressedData);
@@ -413,8 +392,20 @@ class GenerateDownloadZipJob implements ShouldQueue
 
                         $imageData = $wasabi->get($img->processedImage->corrected_path);
 
+                        // ✅ VERIFICAR DESCARGA
+                        if ($imageData === null || $imageData === false) {
+                            Log::warning("⚠️ No se pudo descargar imagen procesada: {$img->processedImage->corrected_path}");
+                            continue;
+                        }
+
                         // ✅ COMPRIMIR IMAGEN PROCESADA
                         $compressedData = $this->compressImageIfNeeded($imageData, $originalExtension);
+
+                        // ✅ VERIFICAR COMPRESIÓN
+                        if (empty($compressedData)) {
+                            Log::warning("⚠️ Compresión falló para imagen procesada: {$img->id}");
+                            continue;
+                        }
 
                         $zip->addFromString("{$root}/{$folderPath}/processed/{$filename}", $compressedData);
                         unset($imageData, $compressedData);
@@ -430,6 +421,12 @@ class GenerateDownloadZipJob implements ShouldQueue
 
                             // ✅ COMPRIMIR IMAGEN ANALIZADA
                             $compressedAnalyzed = $this->compressImageIfNeeded($analyzedContent, '.jpg');
+
+                            // ✅ VERIFICAR COMPRESIÓN ANALIZADA
+                            if (empty($compressedAnalyzed)) {
+                                Log::warning("⚠️ Compresión falló para imagen analizada: {$img->id}");
+                                continue;
+                            }
 
                             $zip->addFromString("{$root}/{$folderPath}/analyzed/{$filename}", $compressedAnalyzed);
                             unset($analyzedContent, $compressedAnalyzed);
@@ -522,6 +519,85 @@ class GenerateDownloadZipJob implements ShouldQueue
     }
 
     /**
+     * ✅ COMPRIMIR IMAGEN SI ES NECESARIO PARA REDUCIR TAMAÑO - VERSIÓN ARREGLADA
+     */
+    private function compressImageIfNeeded($imageData, $extension): string
+    {
+        try {
+            // ✅ Verificar que imageData no esté vacío
+            if (empty($imageData)) {
+                Log::warning("⚠️ imageData vacío para compresión");
+                return ''; // Retornar string vacío en lugar de null
+            }
+
+            // ✅ Solo comprimir JPG/JPEG para máximo ahorro
+            if (!in_array(strtolower($extension), ['.jpg', '.jpeg'])) {
+                return $imageData; // No comprimir PNG, etc.
+            }
+
+            // ✅ Verificar tamaño mínimo antes de procesar
+            if (strlen($imageData) < 1024) { // Menos de 1KB
+                Log::warning("⚠️ Imagen muy pequeña para compresión: " . strlen($imageData) . " bytes");
+                return $imageData;
+            }
+
+            $manager = new ImageManager(new ImagickDriver());
+
+            try {
+                $image = $manager->read($imageData);
+            } catch (\Exception $readException) {
+                Log::warning("⚠️ No se pudo leer imagen para compresión: " . $readException->getMessage());
+                return $imageData; // Retornar original si no se puede leer
+            }
+
+            // ✅ Verificar que la imagen se cargó correctamente
+            if (!$image) {
+                Log::warning("⚠️ No se pudo cargar imagen para compresión");
+                return $imageData;
+            }
+
+            try {
+                // ✅ REDUCIR CALIDAD AGRESIVAMENTE PARA DOWNLOADS
+                $compressed = $image->toJpeg(70)->toString();
+            } catch (\Exception $compressException) {
+                Log::warning("⚠️ Error en toJpeg/toString: " . $compressException->getMessage());
+                return $imageData; // Retornar original si falla compresión
+            }
+
+            // ✅ VERIFICAR QUE LA COMPRESIÓN FUNCIONÓ Y NO RETORNÓ NULL
+            if ($compressed === null || $compressed === false || empty($compressed)) {
+                Log::warning("⚠️ Compresión resultó null/vacía, usando original");
+                return $imageData;
+            }
+
+            // ✅ Log del ahorro de espacio solo en debug (para no saturar logs)
+            if (app()->environment('local')) {
+                $originalSize = strlen($imageData);
+                $compressedSize = strlen($compressed);
+                $savedPercent = round((($originalSize - $compressedSize) / $originalSize) * 100, 1);
+
+                if ($savedPercent > 5) {
+                    Log::debug("📉 Compresión: {$savedPercent}% menos espacio");
+                }
+            }
+
+            return $compressed;
+
+        } catch (\Throwable $e) {
+            Log::warning("⚠️ Error general comprimiendo imagen: " . $e->getMessage());
+
+            // ✅ SIEMPRE retornar string - NUNCA null
+            if (is_string($imageData) && !empty($imageData)) {
+                return $imageData;
+            }
+
+            // ✅ Si imageData tampoco es válido, retornar string vacío
+            Log::error("❌ imageData no válido, retornando string vacío");
+            return '';
+        }
+    }
+
+    /**
      * ✅ LIMPIEZA AGRESIVA DE MEMORIA
      */
     private function aggressiveMemoryCleanup(): void
@@ -574,7 +650,7 @@ class GenerateDownloadZipJob implements ShouldQueue
         ini_set('memory_limit', '8G'); // Aumentar límite como último recurso
     }
 
-    // ✅ RESTO DE MÉTODOS AUXILIARES (sin cambios grandes)
+    // ✅ RESTO DE MÉTODOS AUXILIARES
 
     private function getFolderPathForZipOptimized($folder, $foldersById): string
     {
@@ -724,30 +800,6 @@ class GenerateDownloadZipJob implements ShouldQueue
         }
     }
 
-    /**
-     * ✅ COMPRIMIR IMAGEN SI ES NECESARIO PARA REDUCIR TAMAÑO
-     */
-    private function compressImageIfNeeded($imageData, $extension): string
-    {
-        try {
-            // ✅ Solo comprimir JPG/JPEG para máximo ahorro
-            if (!in_array(strtolower($extension), ['.jpg', '.jpeg'])) {
-                return $imageData; // No comprimir PNG, etc.
-            }
-
-            $manager = new ImageManager(new ImagickDriver());
-            $image = $manager->read($imageData);
-
-            // ✅ REDUCIR CALIDAD AGRESIVAMENTE PARA DOWNLOADS
-            // 70% de calidad = ~50% menos tamaño manteniendo calidad aceptable
-            return $image->toJpeg(70)->toString();
-
-        } catch (\Exception $e) {
-            Log::warning("⚠️ Error comprimiendo imagen: " . $e->getMessage());
-            return $imageData; // Retornar original si falla compresión
-        }
-    }
-
     private function manageZipStorage(array $wasabiPaths, $project, int $totalImages): array
     {
         // ✅ Ya están en Wasabi, solo retornar las rutas
@@ -760,12 +812,54 @@ class GenerateDownloadZipJob implements ShouldQueue
     }
 
     /**
+     * ✅ OBTENER MENSAJE DE ERROR DETALLADO PARA ZIPARCHIVE
+     */
+    private function getZipErrorMessage($errorCode): string
+    {
+        return match($errorCode) {
+            \ZipArchive::ER_MULTIDISK => 'Multi-disk zip archives not supported',
+            \ZipArchive::ER_RENAME => 'Renaming temporary file failed',
+            \ZipArchive::ER_CLOSE => 'Closing zip archive failed',
+            \ZipArchive::ER_SEEK => 'Seek error',
+            \ZipArchive::ER_READ => 'Read error',
+            \ZipArchive::ER_WRITE => 'Write error',
+            \ZipArchive::ER_CRC => 'CRC error',
+            \ZipArchive::ER_ZIPCLOSED => 'Containing zip archive was closed',
+            \ZipArchive::ER_NOENT => 'No such file',
+            \ZipArchive::ER_EXISTS => 'File already exists',
+            \ZipArchive::ER_OPEN => 'Can\'t open file',
+            \ZipArchive::ER_TMPOPEN => 'Failure to create temporary file',
+            \ZipArchive::ER_ZLIB => 'Zlib error',
+            \ZipArchive::ER_MEMORY => 'Memory allocation failure',
+            \ZipArchive::ER_CHANGED => 'Entry has been changed',
+            \ZipArchive::ER_COMPNOTSUPP => 'Compression method not supported',
+            \ZipArchive::ER_EOF => 'Premature EOF',
+            \ZipArchive::ER_INVAL => 'Invalid argument',
+            \ZipArchive::ER_NOZIP => 'Not a zip archive',
+            \ZipArchive::ER_INTERNAL => 'Internal error',
+            \ZipArchive::ER_INCONS => 'Zip archive inconsistent',
+            \ZipArchive::ER_REMOVE => 'Can\'t remove file',
+            \ZipArchive::ER_DELETED => 'Entry has been deleted',
+            default => "Error desconocido: {$errorCode}"
+        };
+    }
+
+    /**
      * ✅ LIMPIEZA DE ARCHIVOS TEMPORALES MEJORADA
      */
     private function cleanupTempFiles(): void
     {
         try {
-            // ✅ Ya no usamos temp_zips, pero limpiamos por si acaso
+            // ✅ Limpiar archivos temporales de sistema
+            $tempFiles = glob(sys_get_temp_dir() . '/export_*_' . $this->projectId . '_*.zip');
+            foreach ($tempFiles as $file) {
+                if (is_file($file) && time() - filemtime($file) > 3600) { // Más de 1 hora
+                    @unlink($file);
+                    Log::debug("🧹 Archivo temporal del sistema eliminado: " . basename($file));
+                }
+            }
+
+            // ✅ Limpiar temp_zips si existe
             $tempDir = storage_path('app/temp_zips');
             if (is_dir($tempDir)) {
                 $files = glob("{$tempDir}/*");
@@ -777,7 +871,7 @@ class GenerateDownloadZipJob implements ShouldQueue
                 }
             }
 
-            // ✅ Limpiar archivos de descarga antiguos
+            // ✅ Limpiar archivos de descarga locales antiguos
             $downloadsPath = storage_path('app/downloads');
             $pattern = "export_{$this->type}_{$this->projectId}_*";
             $files = glob("{$downloadsPath}/{$pattern}");
@@ -785,7 +879,7 @@ class GenerateDownloadZipJob implements ShouldQueue
             foreach ($files as $file) {
                 if (is_file($file) && filemtime($file) < strtotime('-2 hours')) {
                     @unlink($file);
-                    Log::debug("🧹 Archivo descarga antiguo eliminado: " . basename($file));
+                    Log::debug("🧹 Archivo descarga local eliminado: " . basename($file));
                 }
             }
         } catch (\Exception $e) {
@@ -798,7 +892,7 @@ class GenerateDownloadZipJob implements ShouldQueue
      */
     public function failed(\Throwable $exception): void
     {
-        Log::error("❌ [FIXED] GenerateDownloadZipJob FAILED", [
+        Log::error("❌ [FIXED-COMPRESS] GenerateDownloadZipJob FAILED", [
             'batch_id' => $this->batchId,
             'project_id' => $this->projectId,
             'type' => $this->type,
