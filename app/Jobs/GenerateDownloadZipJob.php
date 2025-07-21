@@ -23,10 +23,18 @@ class GenerateDownloadZipJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    // ✅ CONFIGURACIÓN AGRESIVA PARA RESOLVER PROBLEMAS
-    public $timeout = 21600;     // 6 horas - más tiempo
-    public $tries = 1;           // Solo 1 intento
-    public $maxExceptions = 1;
+    // ✅ CONFIGURACIÓN PARA EVITAR REINTENTOS AUTOMÁTICOS
+    public $timeout = 0;         // ⚡ SIN TIMEOUT - JOB LARGO
+    public $tries = 1;           // ⚡ SOLO 1 INTENTO TOTAL
+    public $maxExceptions = 1;   // ⚡ 1 EXCEPCIÓN MÁXIMA
+
+    // ✅ EVITAR QUEUE TIMEOUT
+    public $retryUntil;
+
+    public function retryUntil()
+    {
+        return now()->addDays(1); // ⚡ 24 HORAS PARA COMPLETAR
+    }
 
     public function backoff(): array
     {
