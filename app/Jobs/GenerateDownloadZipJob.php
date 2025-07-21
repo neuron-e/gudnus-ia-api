@@ -33,6 +33,39 @@ class GenerateDownloadZipJob implements ShouldQueue
         return [300]; // 5 minutos entre reintentos
     }
 
+    /**
+     * ✅ OBTENER MENSAJE DE ERROR DETALLADO PARA ZIPARCHIVE
+     */
+    private function getZipErrorMessage($errorCode): string
+    {
+        return match($errorCode) {
+            \ZipArchive::ER_MULTIDISK => 'Multi-disk zip archives not supported',
+            \ZipArchive::ER_RENAME => 'Renaming temporary file failed',
+            \ZipArchive::ER_CLOSE => 'Closing zip archive failed',
+            \ZipArchive::ER_SEEK => 'Seek error',
+            \ZipArchive::ER_READ => 'Read error',
+            \ZipArchive::ER_WRITE => 'Write error',
+            \ZipArchive::ER_CRC => 'CRC error',
+            \ZipArchive::ER_ZIPCLOSED => 'Containing zip archive was closed',
+            \ZipArchive::ER_NOENT => 'No such file',
+            \ZipArchive::ER_EXISTS => 'File already exists',
+            \ZipArchive::ER_OPEN => 'Can\'t open file',
+            \ZipArchive::ER_TMPOPEN => 'Failure to create temporary file',
+            \ZipArchive::ER_ZLIB => 'Zlib error',
+            \ZipArchive::ER_MEMORY => 'Memory allocation failure',
+            \ZipArchive::ER_CHANGED => 'Entry has been changed',
+            \ZipArchive::ER_COMPNOTSUPP => 'Compression method not supported',
+            \ZipArchive::ER_EOF => 'Premature EOF',
+            \ZipArchive::ER_INVAL => 'Invalid argument',
+            \ZipArchive::ER_NOZIP => 'Not a zip archive',
+            \ZipArchive::ER_INTERNAL => 'Internal error',
+            \ZipArchive::ER_INCONS => 'Zip archive inconsistent',
+            \ZipArchive::ER_REMOVE => 'Can\'t remove file',
+            \ZipArchive::ER_DELETED => 'Entry has been deleted',
+            default => "Error desconocido: {$errorCode}"
+        };
+    }
+
     public function __construct(
         public int $projectId,
         public string $type,
@@ -312,21 +345,31 @@ class GenerateDownloadZipJob implements ShouldQueue
         $suffix = $totalChunks > 1 ? "_parte_{$chunkNum}" : '';
         $zipName = "export_{$type}_{$project->id}" . $suffix . "_" . now()->format('Ymd_His') . ".zip";
 
-        // ✅ USAR DIRECTORIO TEMPORAL ESPECÍFICO
-        $tempDir = storage_path('app/temp_zips');
-        if (!is_dir($tempDir)) {
-            mkdir($tempDir, 0755, true);
+        // ✅ USAR DIRECTAMENTE EL DIRECTORIO DOWNLOADS (más confiable)
+        $downloadsDir = storage_path('app/downloads');
+        if (!is_dir($downloadsDir)) {
+            mkdir($downloadsDir, 0755, true);
         }
 
-        $zipPath = $tempDir . '/' . $zipName;
+        $zipPath = $downloadsDir . '/' . $zipName;
 
-        // ✅ CONFIGURAR ZIP CON OPCIONES OPTIMIZADAS
+        // ✅ VERIFICAR PERMISOS DE ESCRITURA
+        if (!is_writable($downloadsDir)) {
+            throw new \Exception("Directorio downloads no escribible: {$downloadsDir}");
+        }
+
+        Log::info("📁 Creando ZIP en: {$zipPath}");
+
+        // ✅ CONFIGURAR ZIP CON VERIFICACIÓN DETALLADA
         $zip = new \ZipArchive;
         $openResult = $zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE);
 
         if ($openResult !== true) {
-            throw new \Exception("No se pudo crear ZIP: {$zipName}. Código: {$openResult}");
+            $errorMsg = $this->getZipErrorMessage($openResult);
+            throw new \Exception("No se pudo crear ZIP: {$zipName}. Error: {$errorMsg} (Código: {$openResult})");
         }
+
+        Log::info("✅ ZIP abierto correctamente: {$zipName}");
 
         // ✅ CONFIGURAR COMPRESIÓN PARA VELOCIDAD
         $zip->setCompressionIndex(0, \ZipArchive::CM_STORE); // Sin compresión para velocidad
@@ -417,7 +460,7 @@ class GenerateDownloadZipJob implements ShouldQueue
             }
         }
 
-        // ✅ CERRAR ZIP CON MANEJO DE ERRORES MEJORADO
+        // ✅ CERRAR ZIP CON VERIFICACIONES EXHAUSTIVAS
         if ($processedInChunk === 0) {
             $zip->close();
             if (file_exists($zipPath)) {
@@ -427,37 +470,71 @@ class GenerateDownloadZipJob implements ShouldQueue
             return null;
         }
 
-        // ✅ FLUSH ANTES DE CERRAR
-        $zip->unchangeAll(); // Asegurar que todos los cambios estén en memoria
+        Log::info("🔄 Preparando cierre de ZIP chunk {$chunkNum} con {$processedInChunk} imágenes...");
 
+        // ✅ VERIFICAR ESTADO DEL ZIP ANTES DE CERRAR
+        $numFiles = $zip->numFiles;
+        Log::info("📊 Archivos en ZIP antes de cerrar: {$numFiles}");
+
+        if ($numFiles === 0) {
+            $zip->close();
+            Log::warning("⚠️ ZIP sin archivos, cancelando chunk {$chunkNum}");
+            return null;
+        }
+
+        // ✅ FLUSH Y CERRAR
         Log::info("🔄 Cerrando ZIP chunk {$chunkNum}...");
         $closeResult = $zip->close();
 
         if (!$closeResult) {
-            throw new \Exception("❌ ZipArchive::close() falló para chunk {$chunkNum}");
+            throw new \Exception("❌ ZipArchive::close() retornó false para chunk {$chunkNum}");
         }
 
-        // ✅ VERIFICAR QUE EL ARCHIVO EXISTE Y ES VÁLIDO
+        Log::info("✅ ZIP cerrado correctamente");
+
+        // ✅ VERIFICACIONES POST-CIERRE MÁS DETALLADAS
         if (!file_exists($zipPath)) {
-            throw new \Exception("❌ ZIP no fue creado correctamente: {$zipPath}");
+            // ✅ Intentar listar archivos en el directorio para debug
+            $dirContents = is_dir($downloadsDir) ? scandir($downloadsDir) : ['directorio no existe'];
+            Log::error("❌ ZIP no existe después del cierre", [
+                'expected_path' => $zipPath,
+                'directory_contents' => $dirContents,
+                'directory_exists' => is_dir($downloadsDir),
+                'directory_writable' => is_writable($downloadsDir)
+            ]);
+            throw new \Exception("❌ ZIP no fue creado: {$zipPath}");
         }
 
         $zipSize = filesize($zipPath);
-        if ($zipSize < 1024) { // Menos de 1KB es sospechoso
+        Log::info("📏 Tamaño del ZIP: " . round($zipSize/1024/1024, 2) . "MB");
+
+        if ($zipSize < 1024) {
+            Log::error("❌ ZIP demasiado pequeño", [
+                'size' => $zipSize,
+                'path' => $zipPath,
+                'processed_images' => $processedInChunk
+            ]);
             throw new \Exception("❌ ZIP demasiado pequeño ({$zipSize} bytes): {$zipPath}");
         }
 
-        // ✅ MOVER A DIRECTORIO FINAL
-        $finalPath = storage_path("app/downloads/{$zipName}");
-        if (!rename($zipPath, $finalPath)) {
-            throw new \Exception("❌ No se pudo mover ZIP de temporal a final");
+        // ✅ VERIFICAR INTEGRIDAD DEL ZIP
+        $testZip = new \ZipArchive;
+        $testResult = $testZip->open($zipPath, \ZipArchive::CHECKCONS);
+        if ($testResult !== true) {
+            $testZip->close();
+            Log::error("❌ ZIP corrupto", [
+                'test_result' => $testResult,
+                'path' => $zipPath
+            ]);
+            throw new \Exception("❌ ZIP corrupto (código: {$testResult}): {$zipPath}");
         }
+        $testZip->close();
 
         $memoryAfter = memory_get_usage(true) / 1024 / 1024;
-        Log::info("✅ ZIP chunk {$chunkNum}/{$totalChunks} generado: {$zipName} ({$processedInChunk} imágenes, " . round($zipSize/1024/1024, 1) . "MB)");
-        Log::info("🧠 Memoria después del chunk {$chunkNum}: {$memoryAfter}MB");
+        Log::info("✅ ZIP chunk {$chunkNum}/{$totalChunks} generado exitosamente: {$zipName}");
+        Log::info("📊 Estadísticas: {$processedInChunk} imágenes, " . round($zipSize/1024/1024, 1) . "MB, memoria: {$memoryAfter}MB");
 
-        return $finalPath;
+        return $zipPath;
     }
 
     /**
@@ -674,7 +751,7 @@ class GenerateDownloadZipJob implements ShouldQueue
     private function cleanupTempFiles(): void
     {
         try {
-            // ✅ Limpiar directorio temporal
+            // ✅ Ya no usamos temp_zips, pero limpiamos por si acaso
             $tempDir = storage_path('app/temp_zips');
             if (is_dir($tempDir)) {
                 $files = glob("{$tempDir}/*");
