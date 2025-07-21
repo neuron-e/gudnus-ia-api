@@ -1,5 +1,6 @@
 <?php
 
+use App\Jobs\CleanupExpiredDownloadsJob;
 use App\Models\ReportGeneration;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Inspiring;
@@ -15,6 +16,11 @@ Artisan::command('inspire', function () {
 
 // ✅ CONFIGURACIÓN CORRECTA PARA LARAVEL 12
 return function (Schedule $schedule) {
+
+    // Limpiar downloads expirados cada día a las 2 AM
+    $schedule->job(new CleanupExpiredDownloadsJob)
+        ->timezone('Europe/Madrid')
+        ->dailyAt('02:00');
 
     // ✅ LIMPIEZA DE ARCHIVOS MISTERIOSOS WASABI - Diaria a las 3:00 AM
     $schedule->command('wasabi:investigate --clean --days=7')
