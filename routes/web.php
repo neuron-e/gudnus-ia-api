@@ -9,7 +9,15 @@ Route::get('/', function () {
 
 
 Horizon::auth(function ($request) {
-    return in_array($request->ip(), [
-        '77.225.135.194',
-    ]);
+    // ✅ AGREGAR MÁS IPs Y DEBUGGING
+    $allowedIPs = [
+        '77.225.135.194',  // Tu IP actual
+        '127.0.0.1',       // Local
+        '::1',             // IPv6 local
+    ];
+
+    $clientIP = $request->ip();
+    \Log::info("Horizon access attempt from IP: {$clientIP}");
+
+    return in_array($clientIP, $allowedIPs);
 });

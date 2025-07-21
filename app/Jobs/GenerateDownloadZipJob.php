@@ -41,12 +41,18 @@ class GenerateDownloadZipJob implements ShouldQueue
         public string $type,
         public int $batchId
     ) {
-        // ✅ Configurar memoria al instanciar
-        ini_set('memory_limit', $this->memoryLimit);
+        // ✅ CONFIGURAR MEMORIA INMEDIATAMENTE
+        ini_set('memory_limit', '4G');
+
+        // ✅ CONFIGURAR TIMEOUT INMEDIATAMENTE
+        ini_set('max_execution_time', 7200);
     }
 
     public function handle()
     {
+        ini_set('memory_limit', '4G');
+        ini_set('max_execution_time', 7200);
+
         $startTime = microtime(true);
 
         Log::info("🚀 [OPTIMIZADO] GenerateDownloadZipJob iniciado", [
@@ -212,11 +218,11 @@ class GenerateDownloadZipJob implements ShouldQueue
 
         // ✅ CHUNKS DINÁMICOS OPTIMIZADOS PARA SERVIDOR POTENTE
         $maxImagesPerZip = match(true) {
-            $imageCount > 3000 => 300,  // ✅ Proyectos masivos: chunks más grandes
-            $imageCount > 2000 => 400,  // ✅ Proyectos muy grandes
-            $imageCount > 1000 => 500,  // ✅ Proyectos grandes
-            $imageCount > 500 => 600,   // ✅ Proyectos medianos
-            default => 800              // ✅ Proyectos pequeños: chunks muy grandes
+            $imageCount > 8000 => 150,  // ✅ MUCHO MÁS PEQUEÑO para 9000+
+            $imageCount > 5000 => 200,  // ✅ Proyectos muy grandes
+            $imageCount > 3000 => 250,  // ✅ Proyectos grandes
+            $imageCount > 1000 => 300,  // ✅ Proyectos medianos
+            default => 500              // ✅ Proyectos pequeños
         };
 
         Log::info("📦 [OPTIMIZADO] Usando chunks de {$maxImagesPerZip} imágenes para {$imageCount} imágenes");
@@ -266,6 +272,11 @@ class GenerateDownloadZipJob implements ShouldQueue
      */
     private function generateZipForChunkOptimized($project, $images, $type, $chunkNum, $totalChunks, $batch, $totalProcessedSoFar, $foldersCache)
     {
+        gc_collect_cycles();
+
+        $memoryBefore = memory_get_usage(true) / 1024 / 1024;
+        Log::info("🧠 Memoria antes del chunk {$chunkNum}: {$memoryBefore}MB");
+
         $suffix = $totalChunks > 1 ? "_parte_{$chunkNum}" : '';
         $zipName = "export_{$type}_{$project->id}" . $suffix . "_" . now()->format('Ymd_His') . ".zip";
         $zipPath = storage_path("app/downloads/{$zipName}");
@@ -286,6 +297,16 @@ class GenerateDownloadZipJob implements ShouldQueue
 
         foreach ($images as $index => $img) {
             try {
+
+                if (($index + 1) % 50 === 0) {
+                    gc_collect_cycles();
+
+                    $currentMemory = memory_get_usage(true) / 1024 / 1024;
+                    if ($currentMemory > 3000) { // Si supera 3GB
+                        Log::warning("⚠️ Memoria alta en chunk {$chunkNum}, imagen {$index}: {$currentMemory}MB");
+                    }
+                }
+
                 // ✅ USAR CACHE DE FOLDERS
                 $folder = $foldersCache[$img->folder_id] ?? null;
                 if (!$folder) {
@@ -347,6 +368,10 @@ class GenerateDownloadZipJob implements ShouldQueue
         }
 
         $zip->close();
+
+        gc_collect_cycles();
+        $memoryAfter = memory_get_usage(true) / 1024 / 1024;
+        Log::info("🧠 Memoria después del chunk {$chunkNum}: {$memoryAfter}MB");
 
         Log::info("✅ ZIP chunk {$chunkNum}/{$totalChunks} generado: {$zipName} ({$processedInChunk} imágenes válidas)");
 
