@@ -243,7 +243,7 @@ class GenerateDownloadZipJob implements ShouldQueue
             }
 
             Log::info("📦 Procesando chunk " . ($chunkIndex + 1) . "/{$imageChunks->count()} ({$chunk->count()} imágenes)");
-
+            try {
             $zipPath = $this->generateZipForChunkOptimized(
                 $project,
                 $chunk,
@@ -261,6 +261,10 @@ class GenerateDownloadZipJob implements ShouldQueue
                 $batch->update(['processed_images' => $totalProcessed]);
 
                 Log::info("✅ Chunk " . ($chunkIndex + 1) . " completado. Total: {$totalProcessed}/{$imageCount}");
+            }
+            } catch (\Throwable $e) {
+                Log::error("❌ Fallo en chunk {$chunkIndex}: " . $e->getMessage());
+                throw $e; // deja que falle el job completo si realmente es grave
             }
         }
 
@@ -368,12 +372,26 @@ class GenerateDownloadZipJob implements ShouldQueue
         }
 
         if ($processedInChunk === 0) {
-            $zip->close(); // aún debes cerrarlo
+            try {
+                if (!$zip->close()) {
+                    throw new \Exception("ZipArchive::close() devolvió false en chunk {$chunkNum}");
+                }
+            } catch (\Throwable $e) {
+                Log::error("❌ Error al cerrar ZIP en chunk {$chunkNum}", ['exception' => $e->getMessage()]);
+                throw new \Exception("Error cerrando ZIP del chunk {$chunkNum}: " . $e->getMessage());
+            }
             Log::warning("⚠️ Chunk {$chunkNum} no contenía imágenes válidas, ZIP no generado");
             return null;
         }
 
-        $zip->close();
+        try {
+            if (!$zip->close()) {
+                throw new \Exception("ZipArchive::close() devolvió false en chunk {$chunkNum}");
+            }
+        } catch (\Throwable $e) {
+            Log::error("❌ Error al cerrar ZIP en chunk {$chunkNum}", ['exception' => $e->getMessage()]);
+            throw new \Exception("Error cerrando ZIP del chunk {$chunkNum}: " . $e->getMessage());
+        }
 
         if (!file_exists($zipPath)) {
             throw new \Exception("ZipArchive::close() falló: archivo no creado ({$zipPath})");
