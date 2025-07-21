@@ -367,7 +367,17 @@ class GenerateDownloadZipJob implements ShouldQueue
             }
         }
 
+        if ($processedInChunk === 0) {
+            $zip->close(); // aún debes cerrarlo
+            Log::warning("⚠️ Chunk {$chunkNum} no contenía imágenes válidas, ZIP no generado");
+            return null;
+        }
+
         $zip->close();
+
+        if (!file_exists($zipPath)) {
+            throw new \Exception("ZipArchive::close() falló: archivo no creado ({$zipPath})");
+        }
 
         gc_collect_cycles();
         $memoryAfter = memory_get_usage(true) / 1024 / 1024;
