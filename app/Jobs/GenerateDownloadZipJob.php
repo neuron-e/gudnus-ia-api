@@ -282,17 +282,17 @@ class GenerateDownloadZipJob implements ShouldQueue
         Log::info("🧠 Memoria antes del chunk {$chunkNum}: {$memoryBefore}MB");
 
         $suffix = $totalChunks > 1 ? "_parte_{$chunkNum}" : '';
-        $zipName = "export_{$type}_{$project->id}" . $suffix . "_" . now()->format('Ymd_His') . ".zip";
-        $zipPath = storage_path("app/downloads/{$zipName}");
+        $zipName = "export_{$type}_{$project->id}{$suffix}_" . now()->format('Ymd_His') . ".zip";
+        $zipTmpPath = storage_path("app/downloads/{$zipName}.tmp");
+        $zipFinalPath = storage_path("app/downloads/{$zipName}");
 
-        // ✅ CREAR DIRECTORIO SI NO EXISTE
-        if (!is_dir(dirname($zipPath))) {
-            mkdir(dirname($zipPath), 0755, true);
+        if (!is_dir(dirname($zipTmpPath))) {
+            mkdir(dirname($zipTmpPath), 0755, true);
         }
 
-        $zip = new \ZipArchive;
-        if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
-            throw new \Exception("No se pudo crear ZIP: {$zipName}");
+        $zip = new \ZipArchive();
+        if ($zip->open($zipTmpPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+            throw new \Exception("No se pudo crear ZIP temporal: {$zipTmpPath}");
         }
 
         $wasabi = Storage::disk('wasabi');
@@ -301,17 +301,14 @@ class GenerateDownloadZipJob implements ShouldQueue
 
         foreach ($images as $index => $img) {
             try {
-
                 if (($index + 1) % 50 === 0) {
                     gc_collect_cycles();
-
                     $currentMemory = memory_get_usage(true) / 1024 / 1024;
-                    if ($currentMemory > 3000) { // Si supera 3GB
+                    if ($currentMemory > 3000) {
                         Log::warning("⚠️ Memoria alta en chunk {$chunkNum}, imagen {$index}: {$currentMemory}MB");
                     }
                 }
 
-                // ✅ USAR CACHE DE FOLDERS
                 $folder = $foldersCache[$img->folder_id] ?? null;
                 if (!$folder) {
                     Log::warning("⚠️ Folder no encontrado para imagen {$img->id}");
@@ -322,11 +319,9 @@ class GenerateDownloadZipJob implements ShouldQueue
                 $originalBaseName = $this->getOriginalImageNameOptimized($img);
                 $addedAnyFile = false;
 
-                // ✅ AGREGAR ARCHIVOS SEGÚN TIPO
                 if (in_array($type, ['original', 'all']) && $img->original_path && $wasabi->exists($img->original_path)) {
                     $originalExtension = $this->getOriginalExtension($img->original_path);
                     $filename = "{$originalBaseName}{$originalExtension}";
-
                     $zip->addFromString("{$root}/{$folderPath}/original/{$filename}", $wasabi->get($img->original_path));
                     $addedAnyFile = true;
                 }
@@ -335,18 +330,15 @@ class GenerateDownloadZipJob implements ShouldQueue
                     if (in_array($type, ['processed', 'all'])) {
                         $originalExtension = $this->getOriginalExtension($img->original_path);
                         $filename = "{$originalBaseName}_processed{$originalExtension}";
-
                         $zip->addFromString("{$root}/{$folderPath}/processed/{$filename}", $wasabi->get($img->processedImage->corrected_path));
                         $addedAnyFile = true;
                     }
 
-                    // ✅ IMÁGENES ANALIZADAS CON CACHE
                     if (in_array($type, ['analyzed', 'all']) && $img->processedImage->ai_response_json) {
                         $analyzedContent = $this->generateAnalyzedImageContentOptimized($img->processedImage);
                         if ($analyzedContent) {
                             $originalExtension = $this->getOriginalExtension($img->original_path);
                             $filename = "{$originalBaseName}_analyzed{$originalExtension}";
-
                             $zip->addFromString("{$root}/{$folderPath}/analyzed/{$filename}", $analyzedContent);
                             $addedAnyFile = true;
                         }
@@ -357,11 +349,9 @@ class GenerateDownloadZipJob implements ShouldQueue
                     $processedInChunk++;
                 }
 
-                // ✅ ACTUALIZAR PROGRESO CADA 100 IMÁGENES (más frecuente)
                 if (($index + 1) % 100 === 0) {
                     $currentTotal = $totalProcessedSoFar + $processedInChunk;
                     $batch->update(['processed_images' => $currentTotal]);
-
                     Log::info("📊 Progreso chunk {$chunkNum}: {$processedInChunk}/{$images->count()} (Total: {$currentTotal}/{$batch->total_images})");
                 }
 
@@ -371,39 +361,60 @@ class GenerateDownloadZipJob implements ShouldQueue
             }
         }
 
+        // Si no hay imágenes válidas, cerrar y eliminar temporal
         if ($processedInChunk === 0) {
             try {
-                if (!$zip->close()) {
-                    throw new \Exception("ZipArchive::close() devolvió false en chunk {$chunkNum}");
-                }
+                $zip->close();
             } catch (\Throwable $e) {
                 Log::error("❌ Error al cerrar ZIP en chunk {$chunkNum}", ['exception' => $e->getMessage()]);
-                throw new \Exception("Error cerrando ZIP del chunk {$chunkNum}: " . $e->getMessage());
             }
-            Log::warning("⚠️ Chunk {$chunkNum} no contenía imágenes válidas, ZIP no generado");
+            unlink($zipTmpPath);
+            Log::warning("⚠️ Chunk {$chunkNum} no contenía imágenes válidas, ZIP descartado");
             return null;
         }
 
+        // ✅ Manejo robusto del cierre y renombrado
         try {
             if (!$zip->close()) {
                 throw new \Exception("ZipArchive::close() devolvió false en chunk {$chunkNum}");
             }
-        } catch (\Throwable $e) {
-            Log::error("❌ Error al cerrar ZIP en chunk {$chunkNum}", ['exception' => $e->getMessage()]);
-            throw new \Exception("Error cerrando ZIP del chunk {$chunkNum}: " . $e->getMessage());
-        }
 
-        if (!file_exists($zipPath)) {
-            throw new \Exception("ZipArchive::close() falló: archivo no creado ({$zipPath})");
+            clearstatcache(true, $zipTmpPath);
+
+            if (!file_exists($zipTmpPath)) {
+                throw new \Exception("Archivo ZIP temporal no existe tras cerrar: {$zipTmpPath}");
+            }
+
+            if (!rename($zipTmpPath, $zipFinalPath)) {
+                throw new \Exception("Fallo al mover ZIP temporal a final: {$zipTmpPath} → {$zipFinalPath}");
+            }
+
+            clearstatcache(true, $zipFinalPath);
+
+            if (!file_exists($zipFinalPath)) {
+                throw new \Exception("Archivo ZIP final no encontrado tras mover: {$zipFinalPath}");
+            }
+
+        } catch (\Throwable $e) {
+            Log::error("❌ Error finalizando ZIP en chunk {$chunkNum}", [
+                'batch_id' => $batch->id,
+                'chunk' => $chunkNum,
+                'error' => $e->getMessage(),
+            ]);
+
+            if (file_exists($zipTmpPath)) {
+                unlink($zipTmpPath);
+            }
+
+            throw new \Exception("Error finalizando ZIP chunk {$chunkNum}: " . $e->getMessage());
         }
 
         gc_collect_cycles();
         $memoryAfter = memory_get_usage(true) / 1024 / 1024;
         Log::info("🧠 Memoria después del chunk {$chunkNum}: {$memoryAfter}MB");
-
         Log::info("✅ ZIP chunk {$chunkNum}/{$totalChunks} generado: {$zipName} ({$processedInChunk} imágenes válidas)");
 
-        return $zipPath;
+        return $zipFinalPath;
     }
 
     /**
