@@ -23,17 +23,17 @@ class GenerateDownloadZipJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    // ✅ CONFIGURACIÓN OPTIMIZADA PARA PROYECTOS GRANDES
-    public $timeout = 14400; // 4 horas (era 2 horas)
-    public $tries = 1;       // Solo 1 intento (era 2) - mejor control manual
+    // ✅ CONFIGURACIÓN OPTIMIZADA PARA SERVIDOR POTENTE
+    public $timeout = 18000;     // ✅ 5 horas (era 4) - proyectos muy grandes
+    public $tries = 1;           // Solo 1 intento - control manual
     public $maxExceptions = 1;
 
-    // ✅ NUEVO: Configurar memoria explícitamente
-    public $memoryLimit = '2G';
+    // ✅ Configurar memoria explícitamente
+    public $memoryLimit = '4G';  // ✅ Más memoria (era 2G)
 
     public function backoff(): array
     {
-        return [300]; // 5 minutos si hay retry
+        return [600]; // 10 minutos si hay retry
     }
 
     public function __construct(
@@ -47,12 +47,15 @@ class GenerateDownloadZipJob implements ShouldQueue
 
     public function handle()
     {
-        Log::info("🚀 GenerateDownloadZipJob iniciado", [
+        $startTime = microtime(true);
+
+        Log::info("🚀 [OPTIMIZADO] GenerateDownloadZipJob iniciado", [
             'batch_id' => $this->batchId,
             'project_id' => $this->projectId,
             'type' => $this->type,
             'memory_limit' => ini_get('memory_limit'),
-            'timeout' => $this->timeout
+            'timeout' => $this->timeout,
+            'server_specs' => '8vCPU/32GB'
         ]);
 
         $batch = DownloadBatch::find($this->batchId);
@@ -74,39 +77,53 @@ class GenerateDownloadZipJob implements ShouldQueue
                 'processed_images' => 0
             ]);
 
-            // ✅ NUEVO: Verificar espacio ANTES de empezar
-            $this->checkAvailableSpace();
+            // ✅ VERIFICACIÓN PREVIA OPTIMIZADA
+            $this->performPreChecks();
 
-            $images = $this->getImagesForType($this->projectId, $this->type);
+            // ✅ OBTENER IMÁGENES CON EAGER LOADING
+            $images = $this->getImagesForTypeOptimized($this->projectId, $this->type);
 
             if ($images->isEmpty()) {
                 throw new \Exception("No hay imágenes del tipo '{$this->type}' para exportar");
             }
 
-            $batch->update(['total_images' => $images->count()]);
-            Log::info("📊 Procesando {$images->count()} imágenes tipo {$this->type}");
+            $totalImages = $images->count();
+            $batch->update(['total_images' => $totalImages]);
 
-            // ✅ CLAVE: Chunks más pequeños para proyectos grandes
-            $localZipPaths = $this->generateZips($project, $images, $batch);
-            $finalPaths = $this->moveZipsToWasabiIfNeeded($localZipPaths, $project);
+            Log::info("📊 [OPTIMIZADO] Procesando {$totalImages} imágenes tipo {$this->type}");
+
+            // ✅ GENERACIÓN OPTIMIZADA DE ZIPS
+            $localZipPaths = $this->generateZipsOptimized($project, $images, $batch);
+
+            // ✅ GESTIÓN INTELIGENTE DE STORAGE
+            $finalPaths = $this->manageZipStorage($localZipPaths, $project, $totalImages);
 
             $batch->update([
                 'status' => 'completed',
                 'completed_at' => now(),
-                'processed_images' => $images->count(),
+                'processed_images' => $totalImages,
                 'file_paths' => $finalPaths,
                 'expires_at' => now()->addDays(3)
             ]);
 
-            Log::info("✅ ZIP generación completada: " . count($finalPaths) . " archivos");
+            $processingTime = round(microtime(true) - $startTime, 2);
+            Log::info("✅ [OPTIMIZADO] ZIP generación completada", [
+                'files_generated' => count($finalPaths),
+                'total_images' => $totalImages,
+                'processing_time' => $processingTime . 's',
+                'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB'
+            ]);
 
         } catch (\Throwable $e) {
-            Log::error("❌ Error generando ZIP: " . $e->getMessage(), [
+            $processingTime = round(microtime(true) - $startTime, 2);
+
+            Log::error("❌ [OPTIMIZADO] Error generando ZIP", [
                 'batch_id' => $this->batchId,
                 'project_id' => $this->projectId,
                 'type' => $this->type,
-                'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB',
-                'trace' => $e->getTraceAsString()
+                'error' => $e->getMessage(),
+                'processing_time' => $processingTime . 's',
+                'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB'
             ]);
 
             $batch->update([
@@ -117,10 +134,11 @@ class GenerateDownloadZipJob implements ShouldQueue
     }
 
     /**
-     * 🆕 NUEVO: Verificar espacio disponible antes de generar
+     * ✅ VERIFICACIONES PREVIAS OPTIMIZADAS
      */
-    private function checkAvailableSpace(): void
+    private function performPreChecks(): void
     {
+        // ✅ Verificar espacio disponible
         $storagePath = storage_path('app');
         $freeBytes = disk_free_space($storagePath);
 
@@ -130,54 +148,105 @@ class GenerateDownloadZipJob implements ShouldQueue
         }
 
         $freeGB = $freeBytes / 1024 / 1024 / 1024;
-        Log::info("💾 Espacio libre: {$freeGB}GB");
+        Log::info("💾 Espacio libre: " . round($freeGB, 1) . "GB");
 
-        // ✅ Para 2096 imágenes necesitamos al menos 8GB libres
-        if ($freeGB < 8) {
-            throw new \Exception("Espacio insuficiente: {$freeGB}GB libres. Se requieren al menos 8GB para este proyecto.");
+        // ✅ REQUERIMIENTOS DINÁMICOS SEGÚN TIPO
+        $requiredGB = match($this->type) {
+            'all' => 15,        // Proyectos completos necesitan mucho espacio
+            'analyzed' => 12,   // Imágenes analizadas son pesadas
+            'processed' => 10,  // Imágenes procesadas
+            'original' => 8,    // Solo originales
+            default => 8
+        };
+
+        if ($freeGB < $requiredGB) {
+            throw new \Exception("Espacio insuficiente: {$freeGB}GB libres. Se requieren al menos {$requiredGB}GB para tipo '{$this->type}'.");
         }
 
-        if ($freeGB < 12) {
-            Log::warning("⚠️ Espacio limitado: {$freeGB}GB libres");
+        if ($freeGB < $requiredGB + 5) {
+            Log::warning("⚠️ Espacio limitado: {$freeGB}GB libres para tipo '{$this->type}'");
         }
     }
 
-    private function generateZips($project, $images, $batch): array
+    /**
+     * ✅ OBTENCIÓN OPTIMIZADA DE IMÁGENES CON EAGER LOADING
+     */
+    private function getImagesForTypeOptimized($projectId, $type)
+    {
+        $baseQuery = Image::with(['processedImage', 'folder'])
+            ->whereHas('folder', fn($q) => $q->where('project_id', $projectId));
+
+        return match($type) {
+            'original' => $baseQuery
+                ->whereNotNull('original_path')
+                ->where('original_path', '!=', '')
+                ->get(),
+
+            'processed' => $baseQuery
+                ->whereHas('processedImage', fn($q) =>
+                $q->whereNotNull('corrected_path')
+                    ->where('corrected_path', '!=', '')
+                )->get(),
+
+            'analyzed' => $baseQuery
+                ->whereHas('processedImage', fn($q) =>
+                $q->whereNotNull('corrected_path')
+                    ->where('corrected_path', '!=', '')
+                    ->whereNotNull('ai_response_json')
+                    ->where('ai_response_json', '!=', '{}')
+                    ->where('ai_response_json', '!=', '')
+                )->get(),
+
+            'all' => $baseQuery->get(),
+
+            default => collect()
+        };
+    }
+
+    /**
+     * ✅ GENERACIÓN OPTIMIZADA DE ZIPS
+     */
+    private function generateZipsOptimized($project, $images, $batch): array
     {
         $imageCount = $images->count();
 
-        // ✅ Chunks dinámicos según el tamaño del proyecto
+        // ✅ CHUNKS DINÁMICOS OPTIMIZADOS PARA SERVIDOR POTENTE
         $maxImagesPerZip = match(true) {
-            $imageCount > 2000 => 200,  // ✅ Proyectos masivos: chunks pequeños
-            $imageCount > 1000 => 300,  // ✅ Proyectos grandes: chunks medianos
-            $imageCount > 500 => 400,   // ✅ Proyectos normales
-            default => 500              // ✅ Proyectos pequeños
+            $imageCount > 3000 => 300,  // ✅ Proyectos masivos: chunks más grandes
+            $imageCount > 2000 => 400,  // ✅ Proyectos muy grandes
+            $imageCount > 1000 => 500,  // ✅ Proyectos grandes
+            $imageCount > 500 => 600,   // ✅ Proyectos medianos
+            default => 800              // ✅ Proyectos pequeños: chunks muy grandes
         };
 
-        Log::info("📦 Usando chunks de {$maxImagesPerZip} imágenes para proyecto de {$imageCount} imágenes");
+        Log::info("📦 [OPTIMIZADO] Usando chunks de {$maxImagesPerZip} imágenes para {$imageCount} imágenes");
 
         $imageChunks = $images->chunk($maxImagesPerZip);
         $zipPaths = [];
         $totalProcessed = 0;
 
+        // ✅ CACHE DE FOLDERS PARA EVITAR CONSULTAS REPETIDAS
+        $foldersCache = Folder::where('project_id', $project->id)->get()->keyBy('id');
+
         foreach ($imageChunks as $chunkIndex => $chunk) {
-            // ✅ CRÍTICO: Liberar memoria entre chunks
+            // ✅ GESTIÓN DE MEMORIA ENTRE CHUNKS
             if ($chunkIndex > 0) {
                 gc_collect_cycles();
                 $memoryMB = memory_get_usage(true) / 1024 / 1024;
-                Log::info("🧹 Memoria liberada. Uso actual: {$memoryMB}MB");
+                Log::info("🧹 Memoria entre chunks: {$memoryMB}MB");
             }
 
             Log::info("📦 Procesando chunk " . ($chunkIndex + 1) . "/{$imageChunks->count()} ({$chunk->count()} imágenes)");
 
-            $zipPath = $this->generateZipForChunk(
+            $zipPath = $this->generateZipForChunkOptimized(
                 $project,
                 $chunk,
                 $this->type,
                 $chunkIndex + 1,
                 $imageChunks->count(),
                 $batch,
-                $totalProcessed
+                $totalProcessed,
+                $foldersCache
             );
 
             if ($zipPath) {
@@ -193,136 +262,15 @@ class GenerateDownloadZipJob implements ShouldQueue
     }
 
     /**
-     * 🆕 NUEVO: Mover ZIPs grandes a Wasabi para liberar espacio local
+     * ✅ GENERACIÓN OPTIMIZADA DE ZIP POR CHUNK
      */
-    private function moveZipsToWasabiIfNeeded(array $localZipPaths, $project): array
-    {
-        $wasabi = Storage::disk('wasabi');
-        $finalPaths = [];
-        $totalSizeMB = 0;
-
-        // ✅ Calcular tamaño total de los ZIPs
-        foreach ($localZipPaths as $localPath) {
-            if (file_exists($localPath)) {
-                $totalSizeMB += filesize($localPath) / 1024 / 1024;
-            }
-        }
-
-        Log::info("📊 Tamaño total de ZIPs: " . round($totalSizeMB, 1) . "MB");
-
-        // ✅ Si el tamaño total es > 100MB, mover a Wasabi
-        $shouldMoveToWasabi = $totalSizeMB > 100;
-
-        if ($shouldMoveToWasabi) {
-            Log::info("📤 Moviendo ZIPs grandes a Wasabi para liberar espacio local...");
-
-            foreach ($localZipPaths as $localPath) {
-                if (!file_exists($localPath)) {
-                    Log::warning("⚠️ Archivo local no encontrado: {$localPath}");
-                    continue;
-                }
-
-                try {
-                    // ✅ Generar ruta en Wasabi
-                    $fileName = basename($localPath);
-                    $wasabiPath = "downloads/project_{$project->id}/{$fileName}";
-
-                    // ✅ Subir a Wasabi usando stream para archivos grandes
-                    $stream = fopen($localPath, 'r');
-                    if (!$stream) {
-                        throw new \Exception("No se pudo abrir el archivo local: {$localPath}");
-                    }
-
-                    $success = $wasabi->writeStream($wasabiPath, $stream);
-                    fclose($stream);
-
-                    if (!$success) {
-                        throw new \Exception("Falló la subida a Wasabi");
-                    }
-
-                    // ✅ Verificar que se subió correctamente
-                    if (!$wasabi->exists($wasabiPath)) {
-                        throw new \Exception("Archivo no encontrado en Wasabi después de la subida");
-                    }
-
-                    $localSizeMB = filesize($localPath) / 1024 / 1024;
-                    $wasabiSizeMB = $wasabi->size($wasabiPath) / 1024 / 1024;
-
-                    if (abs($localSizeMB - $wasabiSizeMB) > 1) { // Tolerancia de 1MB
-                        throw new \Exception("Tamaños no coinciden: local={$localSizeMB}MB, wasabi={$wasabiSizeMB}MB");
-                    }
-
-                    // ✅ Eliminar archivo local después de verificar
-                    unlink($localPath);
-
-                    // ✅ Usar ruta de Wasabi
-                    $finalPaths[] = $wasabiPath;
-
-                    Log::info("✅ ZIP movido a Wasabi: {$fileName} (" . round($localSizeMB, 1) . "MB)");
-
-                } catch (\Exception $e) {
-                    Log::error("❌ Error moviendo ZIP a Wasabi: " . $e->getMessage());
-
-                    // ✅ En caso de error, mantener archivo local
-                    $finalPaths[] = $localPath;
-
-                    // ✅ Limpiar archivo parcial en Wasabi si existe
-                    if (isset($wasabiPath) && $wasabi->exists($wasabiPath)) {
-                        $wasabi->delete($wasabiPath);
-                    }
-                }
-            }
-            $countPaths = count($localZipPaths);
-            $movedCount = collect($finalPaths)->filter(fn($path) => str_starts_with($path, 'downloads/'))->count();
-            Log::info("📤 Resumen: {$movedCount}/{$countPaths} ZIPs movidos a Wasabi");
-
-        } else {
-            Log::info("📁 ZIPs pequeños (<100MB), manteniéndolos en storage local");
-            $finalPaths = $localZipPaths;
-        }
-
-        return $finalPaths;
-    }
-
-
-    /**
-     * ✅ Obtener imágenes específicas según el tipo
-     */
-    private function getImagesForType($projectId, $type)
-    {
-        $query = Image::with(['processedImage', 'folder'])
-            ->whereHas('folder', fn($q) => $q->where('project_id', $projectId));
-
-        switch ($type) {
-            case 'original':
-                return $query->whereNotNull('original_path')->get();
-
-            case 'processed':
-                return $query->whereHas('processedImage', fn($q) =>
-                $q->whereNotNull('corrected_path')
-                )->get();
-
-            case 'analyzed':
-                return $query->whereHas('processedImage', fn($q) =>
-                $q->whereNotNull('corrected_path')
-                    ->whereNotNull('ai_response_json')
-                )->get();
-
-            case 'all':
-                return $query->get();
-
-            default:
-                return collect();
-        }
-    }
-
-    private function generateZipForChunk($project, $images, $type, $chunkNum, $totalChunks, $batch, $totalProcessedSoFar)
+    private function generateZipForChunkOptimized($project, $images, $type, $chunkNum, $totalChunks, $batch, $totalProcessedSoFar, $foldersCache)
     {
         $suffix = $totalChunks > 1 ? "_parte_{$chunkNum}" : '';
         $zipName = "export_{$type}_{$project->id}" . $suffix . "_" . now()->format('Ymd_His') . ".zip";
         $zipPath = storage_path("app/downloads/{$zipName}");
 
-        // Crear directorio si no existe
+        // ✅ CREAR DIRECTORIO SI NO EXISTE
         if (!is_dir(dirname($zipPath))) {
             mkdir(dirname($zipPath), 0755, true);
         }
@@ -333,22 +281,24 @@ class GenerateDownloadZipJob implements ShouldQueue
         }
 
         $wasabi = Storage::disk('wasabi');
-        $folders = Folder::where('project_id', $project->id)->get()->keyBy('id');
         $root = Str::slug($project->name, '_');
         $processedInChunk = 0;
 
         foreach ($images as $index => $img) {
             try {
-                $folderPath = $this->getFolderPathForZip($img->folder, $folders);
+                // ✅ USAR CACHE DE FOLDERS
+                $folder = $foldersCache[$img->folder_id] ?? null;
+                if (!$folder) {
+                    Log::warning("⚠️ Folder no encontrado para imagen {$img->id}");
+                    continue;
+                }
 
-                // ✅ SIMPLIFICADO: Obtener nombre original solo desde original_path
-                $originalBaseName = $this->getOriginalImageName($img);
-
+                $folderPath = $this->getFolderPathForZipOptimized($folder, $foldersCache);
+                $originalBaseName = $this->getOriginalImageNameOptimized($img);
                 $addedAnyFile = false;
 
-                // ✅ Agregar archivos según el tipo solicitado
+                // ✅ AGREGAR ARCHIVOS SEGÚN TIPO
                 if (in_array($type, ['original', 'all']) && $img->original_path && $wasabi->exists($img->original_path)) {
-                    // ✅ MANTENER EXTENSIÓN ORIGINAL
                     $originalExtension = $this->getOriginalExtension($img->original_path);
                     $filename = "{$originalBaseName}{$originalExtension}";
 
@@ -358,7 +308,6 @@ class GenerateDownloadZipJob implements ShouldQueue
 
                 if ($img->processedImage && $img->processedImage->corrected_path && $wasabi->exists($img->processedImage->corrected_path)) {
                     if (in_array($type, ['processed', 'all'])) {
-                        // ✅ USAR NOMBRE ORIGINAL + _processed + EXTENSIÓN ORIGINAL
                         $originalExtension = $this->getOriginalExtension($img->original_path);
                         $filename = "{$originalBaseName}_processed{$originalExtension}";
 
@@ -366,11 +315,10 @@ class GenerateDownloadZipJob implements ShouldQueue
                         $addedAnyFile = true;
                     }
 
-                    // ✅ Imágenes analizadas
+                    // ✅ IMÁGENES ANALIZADAS CON CACHE
                     if (in_array($type, ['analyzed', 'all']) && $img->processedImage->ai_response_json) {
-                        $analyzedContent = $this->generateAnalyzedImageContent($img->processedImage);
+                        $analyzedContent = $this->generateAnalyzedImageContentOptimized($img->processedImage);
                         if ($analyzedContent) {
-                            // ✅ USAR NOMBRE ORIGINAL + _analyzed + EXTENSIÓN ORIGINAL
                             $originalExtension = $this->getOriginalExtension($img->original_path);
                             $filename = "{$originalBaseName}_analyzed{$originalExtension}";
 
@@ -384,8 +332,8 @@ class GenerateDownloadZipJob implements ShouldQueue
                     $processedInChunk++;
                 }
 
-                // ✅ Actualizar progreso cada 25 imágenes
-                if (($index + 1) % 25 === 0) {
+                // ✅ ACTUALIZAR PROGRESO CADA 100 IMÁGENES (más frecuente)
+                if (($index + 1) % 100 === 0) {
                     $currentTotal = $totalProcessedSoFar + $processedInChunk;
                     $batch->update(['processed_images' => $currentTotal]);
 
@@ -393,7 +341,7 @@ class GenerateDownloadZipJob implements ShouldQueue
                 }
 
             } catch (\Exception $e) {
-                Log::warning("Error procesando imagen {$img->id} en chunk {$chunkNum}: " . $e->getMessage());
+                Log::warning("⚠️ Error procesando imagen {$img->id} en chunk {$chunkNum}: " . $e->getMessage());
                 continue;
             }
         }
@@ -405,69 +353,65 @@ class GenerateDownloadZipJob implements ShouldQueue
         return $zipPath;
     }
 
-    private function getOriginalImageName($image): string
+    /**
+     * ✅ GESTIÓN INTELIGENTE DE STORAGE
+     */
+    private function manageZipStorage(array $localZipPaths, $project, int $totalImages): array
     {
-        // ✅ Usar original_path que es lo único disponible por ahora
-        if ($image->original_path) {
-            $originalFilename = basename($image->original_path);
-            $baseName = pathinfo($originalFilename, PATHINFO_FILENAME);
+        $wasabi = Storage::disk('wasabi');
+        $finalPaths = [];
+        $totalSizeMB = 0;
 
-            if ($baseName && $baseName !== 'image' && !empty($baseName)) {
-                return $baseName;
+        // ✅ CALCULAR TAMAÑO TOTAL
+        foreach ($localZipPaths as $localPath) {
+            if (file_exists($localPath)) {
+                $totalSizeMB += filesize($localPath) / 1024 / 1024;
             }
         }
 
-        // ✅ Fallback: Intentar extraer desde corrected_path como último recurso
-        if ($image->processedImage && $image->processedImage->corrected_path) {
-            $processedFilename = basename($image->processedImage->corrected_path);
+        Log::info("📊 Tamaño total de ZIPs: " . round($totalSizeMB, 1) . "MB");
 
-            // Intentar extraer nombre original de nombres como "yolo_processed_yolo_14047_1133364_68760f5a9c4c52.66069594.jpg"
-            if (preg_match('/yolo_processed_yolo_\d+_\d+_([a-zA-Z0-9_\-\.]+)\./', $processedFilename, $matches)) {
-                $extractedName = pathinfo($matches[1], PATHINFO_FILENAME);
-                if (!empty($extractedName)) {
-                    return $extractedName;
-                }
-            }
+        // ✅ DECISIÓN INTELIGENTE: WASABI vs LOCAL
+        $shouldMoveToWasabi = $this->shouldMoveToWasabi($totalSizeMB, $totalImages, $this->type);
 
-            // Intentar extraer desde nombres como "manual_6lAMNxF9.jpg"
-            if (preg_match('/manual_([a-zA-Z0-9_\-]+)\./', $processedFilename, $matches)) {
-                if (!empty($matches[1])) {
-                    return $matches[1];
-                }
-            }
+        if ($shouldMoveToWasabi) {
+            return $this->moveZipsToWasabiOptimized($localZipPaths, $project);
+        } else {
+            Log::info("📁 Manteniendo ZIPs en storage local");
+            return $localZipPaths;
         }
-
-        // ✅ Fallback final: Usar ID de imagen
-        return "imagen_{$image->id}";
     }
 
     /**
-     * ✅ NUEVO: Obtener extensión original de la imagen
+     * ✅ DECISIÓN INTELIGENTE WASABI vs LOCAL
      */
-    private function getOriginalExtension($originalPath): string
+    private function shouldMoveToWasabi(float $totalSizeMB, int $totalImages, string $type): bool
     {
-        if (!$originalPath) {
-            return '.jpg'; // Extensión por defecto
-        }
-
-        $extension = '.' . strtolower(pathinfo($originalPath, PATHINFO_EXTENSION));
-
-        // ✅ Validar que sea una extensión de imagen válida
-        $validExtensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'];
-
-        if (in_array($extension, $validExtensions)) {
-            return $extension;
-        }
-
-        return '.jpg'; // Fallback
+        // ✅ CRITERIOS MEJORADOS PARA SERVIDOR POTENTE
+        return match(true) {
+            $totalSizeMB > 500 => true,     // ✅ ZIPs muy grandes (era 100MB)
+            $totalImages > 2000 => true,   // ✅ Proyectos masivos
+            $type === 'all' => true,       // ✅ Exportaciones completas
+            $totalSizeMB > 200 => true,    // ✅ ZIPs grandes
+            default => false
+        };
     }
 
+    // ✅ MÉTODOS AUXILIARES OPTIMIZADOS
 
-    private function getFolderPathForZip($folder, $foldersById): string
+    private function getFolderPathForZipOptimized($folder, $foldersById): string
     {
+        // ✅ USAR CACHE ESTÁTICO PARA RUTAS YA CALCULADAS
+        static $pathCache = [];
+        $cacheKey = $folder->id;
+
+        if (isset($pathCache[$cacheKey])) {
+            return $pathCache[$cacheKey];
+        }
+
         $path = [];
         $current = $folder;
-        $maxDepth = 10; // Prevenir bucles infinitos
+        $maxDepth = 10;
         $depth = 0;
 
         while ($current && $depth < $maxDepth) {
@@ -477,11 +421,62 @@ class GenerateDownloadZipJob implements ShouldQueue
             $depth++;
         }
 
-        return implode('/', array_reverse($path));
+        $fullPath = implode('/', array_reverse($path));
+        $pathCache[$cacheKey] = $fullPath;
+
+        return $fullPath;
     }
 
-    private function generateAnalyzedImageContent($processedImage): ?string
+    private function getOriginalImageNameOptimized($image): string
     {
+        // ✅ CACHE ESTÁTICO PARA NOMBRES YA CALCULADOS
+        static $nameCache = [];
+        $cacheKey = $image->id;
+
+        if (isset($nameCache[$cacheKey])) {
+            return $nameCache[$cacheKey];
+        }
+
+        $name = 'imagen_' . $image->id; // Default
+
+        if ($image->original_path) {
+            $originalFilename = basename($image->original_path);
+            $baseName = pathinfo($originalFilename, PATHINFO_FILENAME);
+
+            if ($baseName && $baseName !== 'image' && !empty($baseName)) {
+                $name = $baseName;
+            }
+        }
+
+        $nameCache[$cacheKey] = $name;
+        return $name;
+    }
+
+    private function getOriginalExtension($originalPath): string
+    {
+        if (!$originalPath) {
+            return '.jpg';
+        }
+
+        $extension = '.' . strtolower(pathinfo($originalPath, PATHINFO_EXTENSION));
+        $validExtensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'];
+
+        return in_array($extension, $validExtensions) ? $extension : '.jpg';
+    }
+
+    /**
+     * ✅ GENERACIÓN OPTIMIZADA DE IMÁGENES ANALIZADAS
+     */
+    private function generateAnalyzedImageContentOptimized($processedImage): ?string
+    {
+        // ✅ CACHE ESTÁTICO PARA EVITAR REGENERAR
+        static $analyzedCache = [];
+        $cacheKey = md5($processedImage->corrected_path . $processedImage->ai_response_json);
+
+        if (isset($analyzedCache[$cacheKey])) {
+            return $analyzedCache[$cacheKey];
+        }
+
         try {
             if (!$processedImage->ai_response_json) {
                 return null;
@@ -492,7 +487,7 @@ class GenerateDownloadZipJob implements ShouldQueue
             $wasabi = Storage::disk('wasabi');
 
             if (!$wasabi->exists($correctedPath)) {
-                Log::warning("Imagen procesada no encontrada en Wasabi: {$correctedPath}");
+                Log::warning("⚠️ Imagen procesada no encontrada: {$correctedPath}");
                 return null;
             }
 
@@ -500,17 +495,14 @@ class GenerateDownloadZipJob implements ShouldQueue
             $manager = new ImageManager(new ImagickDriver());
             $image = $manager->read($imageData);
 
-            // Interpretar JSON
             $parsed = json_decode($aiResponseJson, true);
             if (!$parsed) {
-                Log::warning("No se pudo parsear AI response JSON");
                 return null;
             }
 
             $predictions = $parsed['final'] ?? ($parsed['predictions'] ?? []);
             $minProbability = $parsed['minProbability'] ?? 0.5;
 
-            // Colores por tipo
             $errorColors = [
                 'Intensidad' => '#FFA500',
                 'Fingers' => '#00BFFF',
@@ -548,33 +540,98 @@ class GenerateDownloadZipJob implements ShouldQueue
                 }
             }
 
-            // Guardar imagen temporal
-            $tmpPath = storage_path('app/tmp/' . uniqid('analyzed_') . '.jpg');
-            if (!is_dir(dirname($tmpPath))) {
-                mkdir(dirname($tmpPath), 0755, true);
+            $content = $image->toJpeg(90)->toString();
+
+            // ✅ GUARDAR EN CACHE CON LÍMITE
+            if (count($analyzedCache) < 100) {
+                $analyzedCache[$cacheKey] = $content;
             }
-
-            $image->toJpeg(90)->save($tmpPath);
-
-            // Leer contenido y eliminar archivo temporal
-            $content = file_get_contents($tmpPath);
-            unlink($tmpPath);
 
             return $content;
 
         } catch (\Exception $e) {
-            Log::warning("Error generando imagen analizada: " . $e->getMessage());
+            Log::warning("⚠️ Error generando imagen analizada: " . $e->getMessage());
             return null;
         }
     }
 
+    /**
+     * ✅ MOVIMIENTO OPTIMIZADO A WASABI
+     */
+    private function moveZipsToWasabiOptimized(array $localZipPaths, $project): array
+    {
+        Log::info("📤 Moviendo ZIPs a Wasabi para liberar espacio local...");
+
+        $wasabi = Storage::disk('wasabi');
+        $finalPaths = [];
+        $movedCount = 0;
+        $totalFiles = count($localZipPaths);
+
+        foreach ($localZipPaths as $index => $localPath) {
+            if (!file_exists($localPath)) {
+                Log::warning("⚠️ Archivo local no encontrado: {$localPath}");
+                continue;
+            }
+
+            try {
+                $fileName = basename($localPath);
+                $wasabiPath = "downloads/project_{$project->id}/{$fileName}";
+
+                // ✅ SUBIDA OPTIMIZADA CON STREAM
+                $stream = fopen($localPath, 'r');
+                if (!$stream) {
+                    throw new \Exception("No se pudo abrir el archivo local: {$localPath}");
+                }
+
+                $success = $wasabi->writeStream($wasabiPath, $stream);
+                fclose($stream);
+
+                if (!$success) {
+                    throw new \Exception("Falló la subida a Wasabi");
+                }
+
+                // ✅ VERIFICACIÓN RÁPIDA
+                if (!$wasabi->exists($wasabiPath)) {
+                    throw new \Exception("Archivo no encontrado en Wasabi después de la subida");
+                }
+
+                $localSizeMB = filesize($localPath) / 1024 / 1024;
+
+                // ✅ ELIMINAR ARCHIVO LOCAL INMEDIATAMENTE
+                unlink($localPath);
+                $finalPaths[] = $wasabiPath;
+                $movedCount++;
+
+                Log::info("✅ ZIP movido a Wasabi: {$fileName} (" . round($localSizeMB, 1) . "MB) [{$movedCount}/{$totalFiles}]");
+
+            } catch (\Exception $e) {
+                Log::error("❌ Error moviendo ZIP a Wasabi: " . $e->getMessage());
+                $finalPaths[] = $localPath;
+
+                // ✅ Limpiar archivo parcial en Wasabi si existe
+                if (isset($wasabiPath) && $wasabi->exists($wasabiPath)) {
+                    $wasabi->delete($wasabiPath);
+                }
+            }
+        }
+
+        Log::info("📤 Resumen movimiento: {$movedCount}/{$totalFiles} ZIPs movidos a Wasabi");
+        return $finalPaths;
+    }
+
+    /**
+     * ✅ MANEJO DE FALLOS OPTIMIZADO
+     */
     public function failed(\Throwable $exception): void
     {
-        Log::error("❌ GenerateDownloadZipJob FAILED para batch {$this->batchId}", [
+        Log::error("❌ GenerateDownloadZipJob FAILED", [
+            'batch_id' => $this->batchId,
+            'project_id' => $this->projectId,
+            'type' => $this->type,
             'error' => $exception->getMessage(),
             'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB',
             'timeout' => $this->timeout,
-            'attempts' => $this->attempts()
+            'server_specs' => '8vCPU/32GB'
         ]);
 
         $batch = DownloadBatch::find($this->batchId);
@@ -583,6 +640,30 @@ class GenerateDownloadZipJob implements ShouldQueue
                 'status' => 'failed',
                 'error' => $exception->getMessage()
             ]);
+        }
+
+        // ✅ LIMPIEZA DE ARCHIVOS TEMPORALES
+        $this->cleanupTempFiles();
+    }
+
+    /**
+     * ✅ LIMPIEZA DE ARCHIVOS TEMPORALES
+     */
+    private function cleanupTempFiles(): void
+    {
+        try {
+            $downloadsPath = storage_path('app/downloads');
+            $pattern = "export_{$this->type}_{$this->projectId}_*";
+            $files = glob("{$downloadsPath}/{$pattern}");
+
+            foreach ($files as $file) {
+                if (is_file($file) && filemtime($file) > strtotime('-1 hour')) {
+                    @unlink($file);
+                    Log::debug("🧹 Archivo temporal eliminado: " . basename($file));
+                }
+            }
+        } catch (\Exception $e) {
+            Log::warning("⚠️ Error limpiando archivos temporales: " . $e->getMessage());
         }
     }
 }

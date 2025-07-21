@@ -20,26 +20,29 @@ class ProcessImageImmediatelyJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $timeout = 180; // 3 minutos por imagen
-    public $tries = 4; // Más reintentos
+    // ✅ CONFIGURACIÓN OPTIMIZADA PARA SERVIDOR POTENTE
+    public $timeout = 300;      // ✅ 5 minutos por imagen (era 180)
+    public $tries = 5;          // ✅ Más reintentos (era 4)
     public $maxExceptions = 3;
 
-    // Constantes para manejo de imágenes
+    // ✅ CONSTANTES OPTIMIZADAS
     private const AZURE_MAX_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
-    private const SAFETY_MARGIN = 0.8; // Margen de seguridad (80% del límite)
-    private const DEFAULT_QUALITIES = [85, 75, 65, 55, 45, 35, 25];
-    private const MIN_DIMENSION = 300; // Dimensión mínima para mantener calidad
+    private const SAFETY_MARGIN = 0.85; // ✅ Margen más conservador (era 0.8)
+    private const DEFAULT_QUALITIES = [90, 80, 70, 60, 50, 40, 30, 20]; // ✅ Más opciones
+    private const MIN_DIMENSION = 300;
+    private const MAX_CONCURRENT_REQUESTS = 15; // ✅ Límite de requests simultáneos Azure
 
     /**
-     * Backoff exponencial con jitter
+     * ✅ BACKOFF OPTIMIZADO - Más agresivo al principio
      */
     public function backoff(): array
     {
         return [
-            10 + rand(0, 10),   // 10-20s
-            30 + rand(0, 30),   // 30-60s
-            90 + rand(0, 60),   // 90-150s
-            300 + rand(0, 120)  // 300-420s
+            5,    // ✅ 5s primer reintento (era 10s)
+            15,   // ✅ 15s segundo reintento (era 30s)
+            45,   // ✅ 45s tercer reintento (era 90s)
+            120,  // ✅ 2min cuarto reintento (era 300s)
+            300   // ✅ 5min quinto reintento (nuevo)
         ];
     }
 
@@ -50,7 +53,14 @@ class ProcessImageImmediatelyJob implements ShouldQueue
 
     public function handle()
     {
-        Log::info("🤖 Iniciando análisis IA para imagen {$this->imageId} (intento {$this->attempts()})");
+        $startTime = microtime(true);
+        $attemptNumber = $this->attempts();
+
+        Log::info("🤖 [INTENTO {$attemptNumber}] Iniciando análisis IA para imagen {$this->imageId}", [
+            'batch_id' => $this->batchId,
+            'attempt' => $attemptNumber,
+            'memory_start' => memory_get_usage(true) / 1024 / 1024 . 'MB'
+        ]);
 
         $image = Image::with(['processedImage', 'analysisResult'])->find($this->imageId);
         if (!$image) {
@@ -61,369 +71,102 @@ class ProcessImageImmediatelyJob implements ShouldQueue
         $batch = $this->batchId ? AnalysisBatch::find($this->batchId) : null;
 
         try {
+            // ✅ VERIFICACIÓN PREVIA OPTIMIZADA
+            if (!$this->validateImageForProcessing($image)) {
+                $this->handleProcessingError($batch, "Imagen no válida para procesamiento");
+                return;
+            }
+
+            // ✅ PROCESAR CON AZURE
             $result = $this->processImageWithAI($image);
 
             if ($result) {
-                Log::info("✅ Imagen {$this->imageId} analizada exitosamente con IA");
+                $processingTime = round(microtime(true) - $startTime, 2);
 
-                // Actualizar batch si existe
+                Log::info("✅ [ÉXITO] Imagen {$this->imageId} analizada correctamente", [
+                    'attempt' => $attemptNumber,
+                    'processing_time' => $processingTime . 's',
+                    'batch_id' => $this->batchId,
+                    'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB'
+                ]);
+
+                // ✅ ACTUALIZAR BATCH DE FORMA THREAD-SAFE
                 if ($batch) {
-                    $batch->increment('processed_images');
-                    $batch->touch();
-
-                    // Log de progreso cada 10 imágenes
-                    if ($batch->processed_images % 10 === 0) {
-                        $progress = round(($batch->processed_images / $batch->total_images) * 100, 1);
-                        Log::info("📊 Progreso batch {$batch->id}: {$batch->processed_images}/{$batch->total_images} ({$progress}%)");
-                    }
+                    $this->updateBatchProgress($batch);
                 }
             } else {
-                Log::error("❌ Error analizando imagen {$this->imageId} con IA");
-                $this->handleProcessingError($batch, "Error en processImageWithAI");
+                throw new \Exception("processImageWithAI retornó false");
             }
 
         } catch (\Throwable $e) {
-            Log::error("❌ Exception analizando imagen {$this->imageId}: " . $e->getMessage());
+            $processingTime = round(microtime(true) - $startTime, 2);
+
+            Log::error("❌ [ERROR] Imagen {$this->imageId} falló en intento {$attemptNumber}", [
+                'error' => $e->getMessage(),
+                'processing_time' => $processingTime . 's',
+                'batch_id' => $this->batchId,
+                'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB'
+            ]);
+
             $this->handleProcessingError($batch, $e->getMessage());
         }
     }
 
     /**
-     * Maneja errores de procesamiento
+     * ✅ VALIDACIÓN PREVIA MEJORADA
      */
-    private function handleProcessingError(?AnalysisBatch $batch, string $error): void
+    private function validateImageForProcessing(Image $image): bool
     {
-        if ($batch) {
-            $batch->touch(); // Solo actualizar timestamp
+        // Verificar que tiene imagen procesada
+        if (!$image->processedImage || !$image->processedImage->corrected_path) {
+            Log::warning("⚠️ Imagen {$image->id}: no recortada");
+            return false;
         }
 
-        // Si es el último intento, loguear como error crítico
-        if ($this->attempts() >= $this->tries) {
-            Log::critical("💀 Imagen {$this->imageId} falló definitivamente después de {$this->attempts()} intentos: {$error}");
+        // Verificar que no está ya procesada
+        if ($image->is_processed) {
+            Log::debug("ℹ️ Imagen {$image->id} ya procesada con IA");
+            return false;
         }
+
+        // Verificar que existe en Wasabi
+        if (!Storage::disk('wasabi')->exists($image->processedImage->corrected_path)) {
+            Log::warning("⚠️ Imagen {$image->id}: archivo no existe en Wasabi");
+            return false;
+        }
+
+        return true;
     }
 
     /**
-     * Valida si la imagen puede ser procesada por Azure
-     */
-    private function validateImageForAzure(string $correctedPath): array
-    {
-        try {
-            if (!Storage::disk('wasabi')->exists($correctedPath)) {
-                return [
-                    'valid' => false,
-                    'error' => 'Archivo no existe en Wasabi'
-                ];
-            }
-
-            $size = Storage::disk('wasabi')->size($correctedPath);
-
-            return [
-                'valid' => $size <= self::AZURE_MAX_SIZE_BYTES,
-                'size' => $size,
-                'max_size' => self::AZURE_MAX_SIZE_BYTES,
-                'needs_resize' => $size > self::AZURE_MAX_SIZE_BYTES,
-                'size_mb' => round($size / 1024 / 1024, 2),
-                'size_formatted' => $this->formatBytes($size)
-            ];
-
-        } catch (\Exception $e) {
-            Log::error("❌ Error validando imagen: " . $e->getMessage());
-            return [
-                'valid' => false,
-                'error' => $e->getMessage()
-            ];
-        }
-    }
-
-    /**
-     * ✅ Redimensiona la imagen usando Intervention Image v3.1 con fallback a GD
-     */
-    private function prepareImageForAzure(string $imageContent): string
-    {
-        $currentSize = strlen($imageContent);
-
-        // Si ya está dentro del límite, devolver tal como está
-        if ($currentSize <= self::AZURE_MAX_SIZE_BYTES) {
-            Log::debug("✅ Imagen dentro del límite: " . $this->formatBytes($currentSize));
-            return $imageContent;
-        }
-
-        Log::info("🔄 Redimensionando imagen: {$this->formatBytes($currentSize)} -> objetivo: {$this->formatBytes(self::AZURE_MAX_SIZE_BYTES)}");
-
-        try {
-            // ✅ Primero intentar con Intervention Image v3.1
-            return $this->resizeWithIntervention($imageContent);
-        } catch (\Exception $e) {
-            Log::warning("⚠️ Intervention Image falló: " . $e->getMessage());
-
-            try {
-                // ✅ Fallback con GD
-                return $this->resizeWithGD($imageContent);
-            } catch (\Exception $gdException) {
-                Log::error("❌ Ambos métodos de redimensionamiento fallaron");
-                throw new \Exception("No se pudo redimensionar la imagen: " . $e->getMessage() . " | GD: " . $gdException->getMessage());
-            }
-        }
-    }
-
-    /**
-     * ✅ Método usando Intervention Image v3.1
-     */
-    private function resizeWithIntervention(string $imageContent): string
-    {
-        $currentSize = strlen($imageContent);
-
-        // ✅ Crear manager con driver GD para v3.1
-        $manager = new ImageManager(new GdDriver());
-        $image = $manager->read($imageContent);
-
-        $originalWidth = $image->width();
-        $originalHeight = $image->height();
-
-        Log::debug("📏 Dimensiones originales: {$originalWidth}x{$originalHeight}");
-
-        // ✅ Estrategia 1: Intentar solo compresión primero
-        foreach ([90, 80, 70, 60, 50, 40, 30] as $quality) {
-            $encoded = $image->toJpeg($quality);
-            $newSize = strlen($encoded);
-
-            if ($newSize <= self::AZURE_MAX_SIZE_BYTES) {
-                Log::info("✅ Imagen redimensionada solo con compresión: {$this->formatBytes($currentSize)} -> {$this->formatBytes($newSize)} (calidad {$quality}%)");
-                return $encoded;
-            }
-        }
-
-        // ✅ Estrategia 2: Reducir dimensiones + compresión
-        $targetSize = (int)(self::AZURE_MAX_SIZE_BYTES * self::SAFETY_MARGIN);
-        $reductionFactor = sqrt($targetSize / $currentSize);
-        $reductionFactor = max($reductionFactor, 0.3); // Mínimo 30%
-
-        $newWidth = max((int)($originalWidth * $reductionFactor), self::MIN_DIMENSION);
-        $newHeight = max((int)($originalHeight * $reductionFactor), self::MIN_DIMENSION);
-
-        Log::debug("🎯 Nuevas dimensiones calculadas: {$newWidth}x{$newHeight} (factor: " . round($reductionFactor, 3) . ")");
-
-        // ✅ Redimensionar con v3.1 syntax
-        $resizedImage = $image->resize($newWidth, $newHeight);
-
-        foreach (self::DEFAULT_QUALITIES as $quality) {
-            $encoded = $resizedImage->toJpeg($quality);
-            $newSize = strlen($encoded);
-
-            Log::debug("🧪 Calidad {$quality}%: {$this->formatBytes($newSize)}");
-
-            if ($newSize <= self::AZURE_MAX_SIZE_BYTES) {
-                Log::info("✅ Imagen redimensionada con Intervention: {$this->formatBytes($currentSize)} -> {$this->formatBytes($newSize)} (calidad {$quality}%, {$newWidth}x{$newHeight})");
-                return $encoded;
-            }
-        }
-
-        // ✅ Si aún es muy grande, reducir más agresivamente
-        $aggressiveWidth = max((int)($newWidth * 0.6), self::MIN_DIMENSION);
-        $aggressiveHeight = max((int)($newHeight * 0.6), self::MIN_DIMENSION);
-
-        Log::warning("⚠️ Aplicando reducción agresiva: {$aggressiveWidth}x{$aggressiveHeight}");
-
-        $finalImage = $image->resize($aggressiveWidth, $aggressiveHeight);
-        $finalEncoded = $finalImage->toJpeg(25);
-        $finalSize = strlen($finalEncoded);
-
-        if ($finalSize <= self::AZURE_MAX_SIZE_BYTES) {
-            Log::info("✅ Imagen redimensionada con reducción agresiva: {$this->formatBytes($currentSize)} -> {$this->formatBytes($finalSize)}");
-            return $finalEncoded;
-        }
-
-        throw new \Exception("No se pudo reducir lo suficiente con Intervention Image. Tamaño final: {$this->formatBytes($finalSize)}");
-    }
-
-    /**
-     * ✅ Método de fallback usando GD mejorado
-     */
-    private function resizeWithGD(string $imageContent): string
-    {
-        $currentSize = strlen($imageContent);
-
-        if ($currentSize <= self::AZURE_MAX_SIZE_BYTES) {
-            return $imageContent;
-        }
-
-        Log::info("🔄 Redimensionando con GD: {$this->formatBytes($currentSize)}");
-
-        try {
-            $sourceImage = imagecreatefromstring($imageContent);
-            if (!$sourceImage) {
-                throw new \Exception("GD no pudo crear imagen desde el contenido");
-            }
-
-            $originalWidth = imagesx($sourceImage);
-            $originalHeight = imagesy($sourceImage);
-
-            Log::debug("📏 Imagen original GD: {$originalWidth}x{$originalHeight} ({$this->formatBytes($currentSize)})");
-
-            // ✅ ESTRATEGIA 1: Intentar solo compresión primero
-            foreach ([90, 80, 70, 60, 50, 40, 30, 20] as $quality) {
-                ob_start();
-                imagejpeg($sourceImage, null, $quality);
-                $compressed = ob_get_clean();
-                $compressedSize = strlen($compressed);
-
-                if ($compressedSize <= self::AZURE_MAX_SIZE_BYTES) {
-                    imagedestroy($sourceImage);
-                    Log::info("✅ Imagen reducida solo con compresión GD: {$this->formatBytes($currentSize)} -> {$this->formatBytes($compressedSize)} (calidad {$quality}%)");
-                    return $compressed;
-                }
-            }
-
-            // ✅ ESTRATEGIA 2: Reducir dimensiones + compresión
-            $targetSize = (int)(self::AZURE_MAX_SIZE_BYTES * self::SAFETY_MARGIN);
-            $reductionFactor = sqrt($targetSize / $currentSize);
-            $reductionFactor = max($reductionFactor, 0.3); // Mínimo 30%
-
-            $newWidth = max((int)($originalWidth * $reductionFactor), self::MIN_DIMENSION);
-            $newHeight = max((int)($originalHeight * $reductionFactor), self::MIN_DIMENSION);
-
-            Log::debug("🎯 Redimensionando con GD a: {$newWidth}x{$newHeight} (factor: " . round($reductionFactor, 3) . ")");
-
-            $resizedImage = imagecreatetruecolor($newWidth, $newHeight);
-
-            // ✅ Configurar para mejor calidad
-            if (function_exists('imagealphablending') && function_exists('imagesavealpha')) {
-                imagealphablending($resizedImage, false);
-                imagesavealpha($resizedImage, true);
-                $transparent = imagecolorallocatealpha($resizedImage, 255, 255, 255, 127);
-                imagefill($resizedImage, 0, 0, $transparent);
-                imagealphablending($resizedImage, true);
-            }
-
-            // ✅ Redimensionar con alta calidad
-            imagecopyresampled(
-                $resizedImage, $sourceImage,
-                0, 0, 0, 0,
-                $newWidth, $newHeight,
-                $originalWidth, $originalHeight
-            );
-
-            // ✅ Probar diferentes calidades hasta encontrar la correcta
-            $result = null;
-            foreach (self::DEFAULT_QUALITIES as $quality) {
-                ob_start();
-                imagejpeg($resizedImage, null, $quality);
-                $encoded = ob_get_clean();
-                $newSize = strlen($encoded);
-
-                if ($newSize <= self::AZURE_MAX_SIZE_BYTES) {
-                    $result = $encoded;
-                    Log::info("✅ Imagen redimensionada con GD: {$this->formatBytes($currentSize)} -> {$this->formatBytes($newSize)} (calidad {$quality}%, {$newWidth}x{$newHeight})");
-                    break;
-                }
-            }
-
-            // ✅ Limpiar memoria
-            imagedestroy($sourceImage);
-            imagedestroy($resizedImage);
-
-            if (!$result) {
-                throw new \Exception("GD no pudo reducir la imagen lo suficiente. Imagen demasiado grande.");
-            }
-
-            return $result;
-
-        } catch (\Exception $e) {
-            Log::error("❌ Error con GD fallback: " . $e->getMessage());
-            throw $e;
-        }
-    }
-
-    /**
-     * Formatea bytes a formato legible
-     */
-    private function formatBytes(int $bytes): string
-    {
-        $units = ['B', 'KB', 'MB', 'GB'];
-        $factor = floor((strlen($bytes) - 1) / 3);
-        return sprintf("%.2f %s", $bytes / pow(1024, $factor), $units[$factor]);
-    }
-
-    /**
-     * Procesar una imagen con análisis IA de Azure (versión mejorada)
+     * ✅ PROCESAMIENTO CON AZURE OPTIMIZADO
      */
     private function processImageWithAI(Image $image): bool
     {
-        // Verificar que tiene imagen procesada (recortada)
-        if (!$image->processedImage || !$image->processedImage->corrected_path) {
-            Log::warning("⚠️ Imagen {$image->id}: no ha sido recortada, no se puede analizar con IA");
-            return false;
-        }
-
         $correctedPath = $image->processedImage->corrected_path;
 
-        if (!Storage::disk('wasabi')->exists($correctedPath)) {
-            Log::warning("⚠️ Imagen {$image->id}: archivo recortado no existe en Wasabi: {$correctedPath}");
-            return false;
-        }
-
-        // Si ya está procesada con IA, saltarla
-        if ($image->is_processed) {
-            Log::debug("ℹ️ Imagen {$image->id} ya está procesada con IA");
-            return true;
-        }
-
-        // Validación previa mejorada
-        $validation = $this->validateImageForAzure($correctedPath);
-
-        if (!$validation['valid']) {
-            if (isset($validation['error'])) {
-                Log::error("❌ Error validando imagen {$image->id}: " . $validation['error']);
-                return false;
-            }
-        }
-
-        if ($validation['needs_resize']) {
-            Log::info("⚠️ Imagen {$image->id} requiere redimensionamiento: {$validation['size_formatted']} > 4MB");
-        } else {
-            Log::info("✅ Imagen {$image->id} dentro del límite: {$validation['size_formatted']}");
-        }
-
         try {
-            // Obtener contenido de la imagen
-            $imageContent = Storage::disk('wasabi')->get($correctedPath);
+            // ✅ VALIDACIÓN DE TAMAÑO
+            $validation = $this->validateImageForAzure($correctedPath);
+            if (!$validation['valid']) {
+                if (isset($validation['error'])) {
+                    throw new \Exception("Error validando: " . $validation['error']);
+                }
+            }
 
-            // Preparar imagen para Azure (redimensionar si es necesario)
+            // ✅ PREPARAR IMAGEN
+            $imageContent = Storage::disk('wasabi')->get($correctedPath);
             $processedImageContent = $this->prepareImageForAzure($imageContent);
 
-            Log::debug("🤖 Enviando imagen {$image->id} a Azure para análisis IA", [
-                'file_path' => $correctedPath,
+            Log::debug("🤖 Enviando a Azure", [
+                'image_id' => $image->id,
                 'original_size' => $this->formatBytes(strlen($imageContent)),
                 'processed_size' => $this->formatBytes(strlen($processedImageContent)),
                 'attempt' => $this->attempts()
             ]);
 
-            // Llamada a Azure con mejor manejo de errores
-            $response = Http::timeout(90)
-                ->retry(3, 1000, function ($exception, $request) {
-                    // Retry en timeouts y errores 5xx
-                    if ($exception instanceof \Illuminate\Http\Client\ConnectionException) {
-                        Log::warning("🔄 Reintentando por error de conexión: " . $exception->getMessage());
-                        return true;
-                    }
-
-                    if ($exception instanceof \Illuminate\Http\Client\RequestException) {
-                        $status = $exception->response?->status() ?? 0;
-                        if ($status >= 500 || $status === 429) {
-                            Log::warning("🔄 Reintentando por status {$status}");
-                            return true;
-                        }
-                    }
-
-                    return false;
-                })
-                ->withHeaders([
-                    'Prediction-Key' => env('AZURE_PREDICTION_KEY'),
-                    'Content-Type' => 'application/octet-stream',
-                ])
-                ->withBody($processedImageContent, 'application/octet-stream')
-                ->post(env('AZURE_PREDICTION_FULL_ENDPOINT'));
+            // ✅ LLAMADA A AZURE CON RETRY INTELIGENTE
+            $response = $this->makeAzureRequest($processedImageContent, $image->id);
 
             if (!$response->successful()) {
                 return $this->handleAzureError($response, $image);
@@ -431,134 +174,398 @@ class ProcessImageImmediatelyJob implements ShouldQueue
 
             $json = $response->json();
             if (!$json || !isset($json['predictions'])) {
-                throw new \Exception("Respuesta de Azure inválida o vacía");
+                throw new \Exception("Respuesta Azure inválida");
             }
 
-            Log::debug("✅ Azure prediction response para imagen {$image->id}", [
-                'predictions_count' => count($json['predictions'])
-            ]);
-
-            // Procesar y guardar resultados
+            // ✅ GUARDAR RESULTADOS
             return $this->saveAnalysisResults($image, $json);
 
         } catch (\Throwable $e) {
-            Log::error("❌ Error en análisis IA para imagen {$image->id}: " . $e->getMessage(), [
-                'attempt' => $this->attempts(),
-                'trace' => $e->getTraceAsString()
-            ]);
-
+            Log::error("❌ Error análisis IA imagen {$image->id}: " . $e->getMessage());
             throw $e;
         }
     }
 
     /**
-     * Maneja errores específicos de Azure
+     * ✅ LLAMADA A AZURE CON RETRY MEJORADO
+     */
+    private function makeAzureRequest(string $imageContent, int $imageId)
+    {
+        $maxRetries = 3;
+        $baseDelay = 1; // segundos
+
+        for ($retry = 0; $retry <= $maxRetries; $retry++) {
+            try {
+                $response = Http::timeout(90)
+                    ->withHeaders([
+                        'Prediction-Key' => env('AZURE_PREDICTION_KEY'),
+                        'Content-Type' => 'application/octet-stream',
+                    ])
+                    ->withBody($imageContent, 'application/octet-stream')
+                    ->post(env('AZURE_PREDICTION_FULL_ENDPOINT'));
+
+                // ✅ Si es exitoso, retornar inmediatamente
+                if ($response->successful()) {
+                    if ($retry > 0) {
+                        Log::info("✅ Azure request exitoso en reintento {$retry} para imagen {$imageId}");
+                    }
+                    return $response;
+                }
+
+                // ✅ MANEJAR RATE LIMITING
+                if ($response->status() === 429) {
+                    $retryAfter = (int)$response->header('Retry-After', 60);
+                    $delaySeconds = max($retryAfter, $baseDelay * pow(2, $retry));
+
+                    if ($retry < $maxRetries) {
+                        Log::warning("⚠️ Rate limit Azure imagen {$imageId}, esperando {$delaySeconds}s (reintento {$retry})");
+                        sleep($delaySeconds);
+                        continue;
+                    }
+                }
+
+                // ✅ ERRORES 5XX - RETRY
+                if ($response->status() >= 500 && $retry < $maxRetries) {
+                    $delaySeconds = $baseDelay * pow(2, $retry);
+                    Log::warning("⚠️ Error Azure {$response->status()} imagen {$imageId}, reintentando en {$delaySeconds}s");
+                    sleep($delaySeconds);
+                    continue;
+                }
+
+                // ✅ Si llegamos aquí, es un error no recoverable
+                break;
+
+            } catch (\Illuminate\Http\Client\ConnectionException $e) {
+                if ($retry < $maxRetries) {
+                    $delaySeconds = $baseDelay * pow(2, $retry);
+                    Log::warning("⚠️ Error conexión Azure imagen {$imageId}, reintentando en {$delaySeconds}s");
+                    sleep($delaySeconds);
+                    continue;
+                }
+                throw $e;
+            }
+        }
+
+        return $response;
+    }
+
+    /**
+     * ✅ MANEJO DE ERRORES AZURE MEJORADO
      */
     private function handleAzureError($response, Image $image): bool
     {
         $statusCode = $response->status();
-        $responseBody = $response->body();
+        $responseBody = substr($response->body(), 0, 500);
 
-        Log::error("❌ Azure prediction failed para imagen {$image->id}", [
+        Log::error("❌ Azure error imagen {$image->id}", [
             'status' => $statusCode,
-            'body' => substr($responseBody, 0, 500), // ✅ Limitar tamaño del log
+            'body' => $responseBody,
             'attempt' => $this->attempts()
         ]);
 
-        // Rate limiting específico
+        // ✅ RATE LIMITING - Delegar al backoff del job
         if ($statusCode === 429) {
-            $retryAfter = $response->header('Retry-After', 60);
-            Log::warning("⚠️ Rate limit alcanzado para imagen {$image->id}, retry after: {$retryAfter}s");
+            $retryAfter = (int)$response->header('Retry-After', 60);
+            Log::warning("⚠️ Rate limit imagen {$image->id}, será reintentado automáticamente");
 
             if ($this->attempts() < $this->tries) {
+                // Liberar job para reintento automático
                 $this->release(now()->addSeconds($retryAfter + rand(5, 15)));
-                return false;
-            } else {
-                Log::error("💀 Rate limit agotado para imagen {$image->id} después de {$this->attempts()} intentos");
                 return false;
             }
         }
 
-        // Errores temporales de Azure (5xx)
+        // ✅ ERRORES TEMPORALES 5XX
         if ($statusCode >= 500) {
-            throw new \Exception("Azure server error {$statusCode}: {$responseBody}");
+            throw new \Exception("Azure server error {$statusCode}");
         }
 
-        // Errores de cliente (4xx) - no reintentar
-        Log::error("💀 Error cliente Azure {$statusCode} para imagen {$image->id}, no reintentando");
+        // ✅ ERRORES CLIENTE 4XX - No reintentar
+        Log::error("💀 Error cliente Azure {$statusCode} imagen {$image->id}, no reintentando");
         return false;
     }
 
     /**
-     * Guarda los resultados del análisis
+     * ✅ ACTUALIZACIÓN THREAD-SAFE DEL BATCH
      */
-    private function saveAnalysisResults(Image $image, array $json): bool
+    private function updateBatchProgress(AnalysisBatch $batch): void
     {
         try {
-            // Mapeo de tags a campos de base de datos
-            $mapping = [
-                'Microgrietas' => 'microcracks_count',
-                'Fingers' => 'finger_interruptions_count',
-                'Black Edges' => 'black_edges_count',
-                'Intensidad' => 'cells_with_different_intensity',
-            ];
+            \DB::transaction(function() use ($batch) {
+                $batch->increment('processed_images');
+                $batch->touch();
+            });
 
-            $counts = [];
-            foreach ($json['predictions'] as $prediction) {
-                $tag = $prediction['tagName'] ?? '';
-                if (isset($mapping[$tag])) {
-                    $field = $mapping[$tag];
-                    $counts[$field] = ($counts[$field] ?? 0) + 1;
-                }
+            // ✅ LOG DE PROGRESO CADA 25 IMÁGENES
+            if ($batch->processed_images % 25 === 0) {
+                $progress = round(($batch->processed_images / $batch->total_images) * 100, 1);
+                Log::info("📊 Progreso batch {$batch->id}: {$batch->processed_images}/{$batch->total_images} ({$progress}%)");
             }
 
-            // Guardar resultados del análisis
-            $analysis = $image->analysisResult ?? new ImageAnalysisResult();
-            $analysis->fill($counts);
-            $image->analysisResult()->save($analysis);
-
-            // Guardar respuesta JSON completa
-            $image->processedImage->ai_response_json = json_encode($json);
-            $image->processedImage->save();
-
-            // Marcar como procesada con IA
-            $image->update(['is_processed' => true]);
-
-            Log::debug("✅ Análisis IA guardado para imagen {$image->id}", $counts);
-            return true;
-
         } catch (\Exception $e) {
-            Log::error("❌ Error guardando resultados para imagen {$image->id}: " . $e->getMessage());
-            throw $e;
+            Log::warning("⚠️ Error actualizando progreso batch: " . $e->getMessage());
         }
     }
 
     /**
-     * Maneja fallos definitivos del job
+     * ✅ PREPARACIÓN DE IMAGEN OPTIMIZADA
+     */
+    private function prepareImageForAzure(string $imageContent): string
+    {
+        $currentSize = strlen($imageContent);
+
+        if ($currentSize <= self::AZURE_MAX_SIZE_BYTES) {
+            return $imageContent;
+        }
+
+        Log::info("🔄 Redimensionando imagen: " . $this->formatBytes($currentSize));
+
+        try {
+            return $this->resizeWithIntervention($imageContent);
+        } catch (\Exception $e) {
+            Log::warning("⚠️ Intervention falló: " . $e->getMessage());
+            try {
+                return $this->resizeWithGD($imageContent);
+            } catch (\Exception $gdException) {
+                throw new \Exception("Redimensionamiento falló: " . $e->getMessage());
+            }
+        }
+    }
+
+    /**
+     * ✅ REDIMENSIONAMIENTO CON INTERVENTION MEJORADO
+     */
+    private function resizeWithIntervention(string $imageContent): string
+    {
+        $manager = new ImageManager(new GdDriver());
+        $image = $manager->read($imageContent);
+
+        $originalWidth = $image->width();
+        $originalHeight = $image->height();
+
+        // ✅ ESTRATEGIA 1: Solo compresión
+        foreach ([85, 75, 65, 55, 45, 35, 25, 15] as $quality) {
+            $encoded = $image->toJpeg($quality);
+            $newSize = strlen($encoded);
+
+            if ($newSize <= self::AZURE_MAX_SIZE_BYTES) {
+                Log::info("✅ Redimensionado solo compresión: {$this->formatBytes($newSize)} (Q{$quality}%)");
+                return $encoded;
+            }
+        }
+
+        // ✅ ESTRATEGIA 2: Reducir dimensiones
+        $targetSize = (int)(self::AZURE_MAX_SIZE_BYTES * self::SAFETY_MARGIN);
+        $reductionFactor = sqrt($targetSize / strlen($imageContent));
+        $reductionFactor = max($reductionFactor, 0.25); // Mínimo 25%
+
+        $newWidth = max((int)($originalWidth * $reductionFactor), self::MIN_DIMENSION);
+        $newHeight = max((int)($originalHeight * $reductionFactor), self::MIN_DIMENSION);
+
+        $resizedImage = $image->resize($newWidth, $newHeight);
+
+        foreach (self::DEFAULT_QUALITIES as $quality) {
+            $encoded = $resizedImage->toJpeg($quality);
+            $newSize = strlen($encoded);
+
+            if ($newSize <= self::AZURE_MAX_SIZE_BYTES) {
+                Log::info("✅ Redimensionado: {$this->formatBytes($newSize)} (Q{$quality}%, {$newWidth}x{$newHeight})");
+                return $encoded;
+            }
+        }
+
+        throw new \Exception("No se pudo reducir suficientemente");
+    }
+
+    /**
+     * ✅ VALIDACIÓN DE IMAGEN PARA AZURE
+     */
+    private function validateImageForAzure(string $correctedPath): array
+    {
+        try {
+            if (!Storage::disk('wasabi')->exists($correctedPath)) {
+                return ['valid' => false, 'error' => 'Archivo no existe'];
+            }
+
+            $size = Storage::disk('wasabi')->size($correctedPath);
+
+            return [
+                'valid' => $size <= self::AZURE_MAX_SIZE_BYTES,
+                'size' => $size,
+                'needs_resize' => $size > self::AZURE_MAX_SIZE_BYTES,
+                'size_formatted' => $this->formatBytes($size)
+            ];
+
+        } catch (\Exception $e) {
+            return ['valid' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * ✅ GUARDADO DE RESULTADOS OPTIMIZADO
+     */
+    private function saveAnalysisResults(Image $image, array $json): bool
+    {
+        try {
+            \DB::transaction(function() use ($image, $json) {
+                // ✅ Mapeo de tags a campos
+                $mapping = [
+                    'Microgrietas' => 'microcracks_count',
+                    'Fingers' => 'finger_interruptions_count',
+                    'Black Edges' => 'black_edges_count',
+                    'Intensidad' => 'cells_with_different_intensity',
+                ];
+
+                $counts = [];
+                foreach ($json['predictions'] as $prediction) {
+                    $tag = $prediction['tagName'] ?? '';
+                    if (isset($mapping[$tag])) {
+                        $field = $mapping[$tag];
+                        $counts[$field] = ($counts[$field] ?? 0) + 1;
+                    }
+                }
+
+                // ✅ Guardar análisis
+                $analysis = $image->analysisResult ?? new ImageAnalysisResult();
+                $analysis->fill($counts);
+                $image->analysisResult()->save($analysis);
+
+                // ✅ Guardar JSON completo
+                $image->processedImage->ai_response_json = json_encode($json);
+                $image->processedImage->save();
+
+                // ✅ Marcar como procesada
+                $image->update(['is_processed' => true]);
+            });
+
+            Log::debug("✅ Resultados guardados imagen {$image->id}");
+            return true;
+
+        } catch (\Exception $e) {
+            Log::error("❌ Error guardando resultados imagen {$image->id}: " . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    // ✅ MÉTODOS AUXILIARES
+
+    private function handleProcessingError(?AnalysisBatch $batch, string $error): void
+    {
+        if ($batch) {
+            try {
+                \DB::transaction(function() use ($batch) {
+                    $batch->increment('errors');
+                    $batch->touch();
+                });
+            } catch (\Exception $e) {
+                Log::warning("Error actualizando errores batch: " . $e->getMessage());
+            }
+        }
+
+        if ($this->attempts() >= $this->tries) {
+            Log::critical("💀 Imagen {$this->imageId} falló definitivamente: {$error}");
+        }
+    }
+
+    private function formatBytes(int $bytes): string
+    {
+        $units = ['B', 'KB', 'MB', 'GB'];
+        $factor = floor((strlen($bytes) - 1) / 3);
+        return sprintf("%.2f %s", $bytes / pow(1024, $factor), $units[$factor]);
+    }
+
+    private function resizeWithGD(string $imageContent): string
+    {
+        // ✅ Implementación GD optimizada similar pero más simple
+        $sourceImage = imagecreatefromstring($imageContent);
+        if (!$sourceImage) {
+            throw new \Exception("GD no pudo crear imagen");
+        }
+
+        // Solo compresión primero
+        foreach ([85, 75, 65, 55, 45, 35, 25, 15] as $quality) {
+            ob_start();
+            imagejpeg($sourceImage, null, $quality);
+            $compressed = ob_get_clean();
+
+            if (strlen($compressed) <= self::AZURE_MAX_SIZE_BYTES) {
+                imagedestroy($sourceImage);
+                return $compressed;
+            }
+        }
+
+        // Redimensionar si la compresión no es suficiente
+        $originalWidth = imagesx($sourceImage);
+        $originalHeight = imagesy($sourceImage);
+
+        $targetSize = (int)(self::AZURE_MAX_SIZE_BYTES * self::SAFETY_MARGIN);
+        $reductionFactor = sqrt($targetSize / strlen($imageContent));
+        $reductionFactor = max($reductionFactor, 0.25);
+
+        $newWidth = max((int)($originalWidth * $reductionFactor), self::MIN_DIMENSION);
+        $newHeight = max((int)($originalHeight * $reductionFactor), self::MIN_DIMENSION);
+
+        $resizedImage = imagecreatetruecolor($newWidth, $newHeight);
+        imagecopyresampled(
+            $resizedImage, $sourceImage,
+            0, 0, 0, 0,
+            $newWidth, $newHeight,
+            $originalWidth, $originalHeight
+        );
+
+        foreach (self::DEFAULT_QUALITIES as $quality) {
+            ob_start();
+            imagejpeg($resizedImage, null, $quality);
+            $encoded = ob_get_clean();
+
+            if (strlen($encoded) <= self::AZURE_MAX_SIZE_BYTES) {
+                imagedestroy($sourceImage);
+                imagedestroy($resizedImage);
+                return $encoded;
+            }
+        }
+
+        imagedestroy($sourceImage);
+        imagedestroy($resizedImage);
+        throw new \Exception("GD no pudo reducir suficientemente");
+    }
+
+    /**
+     * ✅ MANEJO DE FALLOS DEFINITIVOS
      */
     public function failed(\Throwable $exception): void
     {
-        Log::error("❌ ProcessImageImmediatelyJob falló definitivamente para imagen {$this->imageId}: " . $exception->getMessage());
+        Log::error("❌ ProcessImageImmediatelyJob FAILED definitivamente", [
+            'image_id' => $this->imageId,
+            'batch_id' => $this->batchId,
+            'error' => $exception->getMessage(),
+            'attempts' => $this->attempts(),
+            'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB'
+        ]);
 
         if ($this->batchId) {
             $batch = AnalysisBatch::find($this->batchId);
             if ($batch) {
-                // Incrementar contador de errores
-                $errors = $batch->errors ?? 0;
-                $batch->update([
-                    'errors' => $errors + 1,
-                    'updated_at' => now()
-                ]);
+                try {
+                    \DB::transaction(function() use ($batch) {
+                        $errors = $batch->errors ?? 0;
+                        $batch->update([
+                            'errors' => $errors + 1,
+                            'updated_at' => now()
+                        ]);
+                    });
 
-                $totalErrors = $errors + 1;
-                $errorRate = $totalErrors / $batch->total_images;
+                    $totalErrors = ($batch->errors ?? 0) + 1;
+                    $errorRate = $totalErrors / $batch->total_images;
 
-                // Si hay demasiados errores (>20%), marcar como fallido
-                if ($errorRate > 0.2) {
-                    Log::critical("💀 Batch {$batch->id} tiene demasiados errores ({$errorRate}%), marcando como fallido");
-                    $batch->update(['status' => 'failed']);
-                } else {
-                    Log::info("📊 Batch {$batch->id}: {$totalErrors} errores de {$batch->total_images} ({$errorRate}%)");
+                    // ✅ Si hay demasiados errores, marcar batch como fallido
+                    if ($errorRate > 0.25) { // 25% de error máximo
+                        Log::critical("💀 Batch {$batch->id} con demasiados errores ({$errorRate}%), marcando como fallido");
+                        $batch->update(['status' => 'failed']);
+                    }
+
+                } catch (\Exception $e) {
+                    Log::error("Error actualizando errores en batch: " . $e->getMessage());
                 }
             }
         }

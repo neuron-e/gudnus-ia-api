@@ -85,11 +85,11 @@ return [
 
     'waits' => [
         'redis:default' => 60,
-        'redis:images' => 60,
-        'redis:analysis' => 120,
-        'redis:zip-analysis' => 300,
-        'redis:downloads' => 1200,   // ✅ 20 minutos (era 10) - para proyectos grandes
-        'redis:reports' => 2400,
+        'redis:images' => 180,        // ✅ 3 minutos - procesamiento más complejo
+        'redis:analysis' => 300,      // ✅ 5 minutos - API de Azure puede ser lenta
+        'redis:zip-analysis' => 600,  // ✅ 10 minutos - análisis de ZIP grandes
+        'redis:downloads' => 1800,    // ✅ 30 minutos - generación ZIP grandes
+        'redis:reports' => 3600,      // ✅ 1 hora - reportes muy grandes
     ],
 
     /*
@@ -105,8 +105,8 @@ return [
 
     'trim' => [
         'recent' => 1440,        // ✅ 24 horas (era 60 minutos)
-        'pending' => 1440,       // ✅ 24 horas (era 60 minutos)
-        'completed' => 1440,     // ✅ 24 horas (era 60 minutos) - AQUÍ ESTÁ EL PROBLEMA
+        'pending' => 1440,       // ✅ 24 horas
+        'completed' => 2880,     // ✅ 48 horas - para debugging de jobs completados
         'recent_failed' => 10080, // 7 días
         'failed' => 10080,        // 7 días
         'monitored' => 10080,     // 7 días
@@ -140,8 +140,8 @@ return [
 
     'metrics' => [
         'trim_snapshots' => [
-            'job' => 24,
-            'queue' => 24,
+            'job' => 48,    // ✅ 48 horas de métricas
+            'queue' => 48,
         ],
     ],
 
@@ -158,7 +158,7 @@ return [
     |
     */
 
-    'fast_termination' => false,
+    'fast_termination' => true,
 
     /*
     |--------------------------------------------------------------------------
@@ -171,7 +171,7 @@ return [
     |
     */
 
-    'memory_limit' => 64,
+    'memory_limit' => 256,
 
     /*
     |--------------------------------------------------------------------------
@@ -202,111 +202,147 @@ return [
 
     'environments' => [
         'production' => [
-            // ✅ Cola default (tareas ligeras)
+            // ✅ COLA DEFAULT - Tareas ligeras y generales
             'supervisor-default' => [
                 'connection' => 'redis',
                 'queue' => ['default'],
                 'balance' => 'auto',
                 'autoScalingStrategy' => 'time',
-                'minProcesses' => 2,
-                'maxProcesses' => 6,
+                'minProcesses' => 3,        // ✅ Más procesos base
+                'maxProcesses' => 8,        // ✅ Más procesos máximos
                 'tries' => 3,
                 'timeout' => 300,
-                'memory' => 128,
+                'memory' => 256,            // ✅ Más memoria por worker
                 'sleep' => 3,
                 'maxJobs' => 1000,
                 'rest' => 30,
             ],
 
-            // ✅ Cola de procesamiento de imágenes (recorte)
+            // ✅ COLA IMAGES - Procesamiento y recorte de imágenes
             'supervisor-images' => [
                 'connection' => 'redis',
                 'queue' => ['images'],
                 'balance' => 'auto',
                 'autoScalingStrategy' => 'size',
-                'minProcesses' => 2,
-                'maxProcesses' => 5, // ✅ Más workers para 2000 imágenes
+                'minProcesses' => 5,        // ✅ Más procesos base (era 2)
+                'maxProcesses' => 12,       // ✅ Más procesos máximos (era 5)
                 'tries' => 3,
-                'timeout' => 900,    // 15 minutos por imagen
-                'memory' => 512,
-                'sleep' => 5,
-                'maxJobs' => 50,     // Restart más frecuente para liberar memoria
+                'timeout' => 1200,          // ✅ 20 minutos por imagen (era 15)
+                'memory' => 512,            // ✅ Más memoria (era 256)
+                'sleep' => 3,               // ✅ Menos sleep (era 5)
+                'maxJobs' => 100,           // ✅ Más jobs antes de restart (era 50)
                 'rest' => 15,
             ],
 
-            // ✅ Cola de análisis IA (más crítica)
+            // ✅ COLA ANALYSIS - Análisis IA con Azure
             'supervisor-analysis' => [
                 'connection' => 'redis',
                 'queue' => ['analysis'],
                 'balance' => 'auto',
                 'autoScalingStrategy' => 'size',
-                'minProcesses' => 5,
-                'maxProcesses' => 15, // ✅ Muchos workers para Azure API
-                'tries' => 4,         // ✅ Más reintentos por rate limiting
-                'timeout' => 300,     // ✅ 5 minutos por análisis IA
+                'minProcesses' => 8,        // ✅ Muchos procesos base (era 5)
+                'maxProcesses' => 20,       // ✅ Muchos procesos máximos (era 15)
+                'tries' => 4,               // ✅ Reintentos por rate limiting
+                'timeout' => 300,           // ✅ 5 minutos por análisis
                 'memory' => 256,
-                'sleep' => 3,         // ✅ Importante para rate limiting Azure
-                'maxJobs' => 100,
-                'rest' => 30,
+                'sleep' => 2,               // ✅ Menos sleep (era 3) pero respetando Azure
+                'maxJobs' => 150,           // ✅ Más jobs antes de restart (era 100)
+                'rest' => 15,               // ✅ Menos descanso (era 30)
             ],
 
-            // ✅ NUEVA: Cola para análisis de ZIP grandes
+            // ✅ COLA ZIP-ANALYSIS - Análisis de ZIPs grandes
             'supervisor-zip-analysis' => [
                 'connection' => 'redis',
                 'queue' => ['zip-analysis'],
                 'balance' => 'simple',
-                'processes' => 2,     // Pocos workers, jobs muy pesados
+                'processes' => 3,           // ✅ Más procesos (era 2)
                 'tries' => 2,
-                'timeout' => 3600,    // 1 hora para ZIPs muy grandes
-                'memory' => 1024,      // Mucha memoria para ZIPs grandes
+                'timeout' => 3600,          // 1 hora
+                'memory' => 1024,           // ✅ Más memoria (era 512)
                 'sleep' => 5,
-                'maxJobs' => 10,      // Restart frecuente
-                'rest' => 60,
+                'maxJobs' => 15,            // ✅ Más jobs (era 10)
+                'rest' => 30,               // ✅ Menos descanso (era 60)
             ],
 
+            // ✅ COLA DOWNLOADS - Generación de ZIPs de descarga
             'supervisor-downloads' => [
                 'connection' => 'redis',
                 'queue' => ['downloads'],
                 'balance' => 'auto',
                 'autoScalingStrategy' => 'size',
-                'minProcesses' => 1,
-                'maxProcesses' => 2,     // ✅ Máximo 2 (era 3) - proyectos grandes necesitan más recursos
-                'tries' => 1,            // ✅ Solo 1 intento (era 2) - coincide con el job
-                'timeout' => 14400,      // ✅ 4 horas (era 2) - coincide con el job
-                'memory' => 2048,        // ✅ 2GB (era 1GB) - para proyectos masivos
+                'minProcesses' => 2,
+                'maxProcesses' => 4,        // ✅ Más procesos máximos (era 2)
+                'tries' => 1,               // Solo 1 intento - control manual
+                'timeout' => 14400,         // 4 horas
+                'memory' => 2048,           // 2GB por worker
                 'sleep' => 5,
-                'maxJobs' => 5,          // ✅ Menos jobs antes de restart (era 10)
-                'rest' => 600,           // ✅ 10 minutos descanso (era 5) - liberar memoria
+                'maxJobs' => 8,             // ✅ Más jobs (era 5)
+                'rest' => 300,              // ✅ Menos descanso (era 600)
             ],
 
-            // ✅ NUEVA: Cola para generación de reportes
+            // ✅ COLA REPORTS - Generación de reportes PDF
             'supervisor-reports' => [
                 'connection' => 'redis',
                 'queue' => ['reports'],
                 'balance' => 'auto',
                 'autoScalingStrategy' => 'time',
                 'minProcesses' => 1,
-                'maxProcesses' => 2,        // Máximo 2 reportes simultáneos
-                'tries' => 1,               // ✅ Solo 1 intento (era 2)
-                'timeout' => 14400,         // ✅ 4 horas (era 1 hora)
-                'memory' => 2048,           // ✅ 2GB memoria (era 1GB)
+                'maxProcesses' => 3,        // ✅ Más procesos (era 2)
+                'tries' => 1,
+                'timeout' => 14400,         // 4 horas
+                'memory' => 2048,           // 2GB
                 'sleep' => 10,
-                'maxJobs' => 3,             // ✅ Menos jobs antes de restart
-                'rest' => 1200,             // ✅ 20 minutos descanso (era 10)
+                'maxJobs' => 5,             // ✅ Más jobs (era 3)
+                'rest' => 600,              // ✅ Menos descanso (era 1200)
             ],
 
-            // ✅ Cola para tareas muy pesadas (batch completos)
-            'supervisor-heavy' => [
+            // ✅ NUEVA COLA: HIGH-PRIORITY - Para tareas urgentes
+            'supervisor-high-priority' => [
                 'connection' => 'redis',
-                'queue' => ['heavy-tasks'],
+                'queue' => ['high-priority'],
+                'balance' => 'auto',
+                'autoScalingStrategy' => 'size',
+                'minProcesses' => 2,
+                'maxProcesses' => 6,
+                'tries' => 3,
+                'timeout' => 600,           // 10 minutos
+                'memory' => 512,
+                'sleep' => 1,               // Muy poco sleep para urgentes
+                'maxJobs' => 50,
+                'rest' => 5,
+            ],
+        ],
+
+        // ✅ CONFIGURACIÓN PARA DESARROLLO/STAGING
+        'local' => [
+            'supervisor-default' => [
+                'connection' => 'redis',
+                'queue' => ['default'],
                 'balance' => 'simple',
-                'processes' => 1,     // Solo 1 worker para no saturar
-                'tries' => 1,
-                'timeout' => 7200,    // 2 horas máximo
-                'memory' => 1024,
-                'sleep' => 10,
-                'maxJobs' => 3,
-                'rest' => 300,        // 5 minutos de descanso
+                'processes' => 3,
+                'tries' => 3,
+                'timeout' => 60,
+                'memory' => 128,
+            ],
+
+            'supervisor-images' => [
+                'connection' => 'redis',
+                'queue' => ['images'],
+                'balance' => 'simple',
+                'processes' => 2,
+                'tries' => 3,
+                'timeout' => 300,
+                'memory' => 256,
+            ],
+
+            'supervisor-analysis' => [
+                'connection' => 'redis',
+                'queue' => ['analysis'],
+                'balance' => 'simple',
+                'processes' => 3,
+                'tries' => 3,
+                'timeout' => 180,
+                'memory' => 256,
             ],
         ],
     ],

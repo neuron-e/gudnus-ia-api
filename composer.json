@@ -7,7 +7,9 @@
     "license": "MIT",
     "require": {
         "php": "^8.2",
+        "ext-gd": "*",
         "ext-zip": "*",
+        "aws/aws-sdk-php": "^3.349",
         "barryvdh/laravel-dompdf": "^3.1",
         "intervention/image": "^3.11",
         "laravel/framework": "^12.0",
@@ -16,7 +18,8 @@
         "laravel/sanctum": "^4.1",
         "laravel/tinker": "^2.10.1",
         "league/flysystem-aws-s3-v3": "^3.29",
-        "phpoffice/phpspreadsheet": "^4.2"
+        "phpoffice/phpspreadsheet": "^4.2",
+        "setasign/fpdi": "^2.6"
     },
     "require-dev": {
         "fakerphp/faker": "^1.23",

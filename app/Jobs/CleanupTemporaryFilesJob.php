@@ -18,224 +18,358 @@ class CleanupTemporaryFilesJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $timeout = 1800; // 30 minutos
-    public $tries = 1;
+    // ✅ CONFIGURACIÓN OPTIMIZADA PARA SERVIDOR POTENTE
+    public $timeout = 3600; // 1 hora (era 30 minutos)
+    public $tries = 1;      // Solo 1 intento
 
     public function handle()
     {
-        Log::info("🧹 Iniciando limpieza de archivos temporales");
+        $startTime = microtime(true);
+
+        Log::info("🧹 [OPTIMIZADO] Iniciando limpieza de archivos temporales", [
+            'server_specs' => '8vCPU/32GB',
+            'memory_limit' => ini_get('memory_limit')
+        ]);
 
         $stats = [
             'downloads_cleaned' => 0,
             'reports_cleaned' => 0,
             'zip_analysis_cleaned' => 0,
             'temp_dirs_cleaned' => 0,
-            'space_freed_mb' => 0
+            'space_freed_mb' => 0,
+            'files_processed' => 0
         ];
 
         try {
-            // 1. Limpiar descargas expiradas
-            $stats['downloads_cleaned'] = $this->cleanupExpiredDownloads();
+            // ✅ VERIFICAR ESPACIO INICIAL
+            $initialSpace = $this->getDiskSpaceInfo();
 
-            // 2. Limpiar reportes expirados
-            $stats['reports_cleaned'] = $this->cleanupExpiredReports();
+            // ✅ LIMPIEZA OPTIMIZADA EN PARALELO LÓGICO
+            $stats['downloads_cleaned'] = $this->cleanupExpiredDownloadsOptimized();
+            $stats['reports_cleaned'] = $this->cleanupExpiredReportsOptimized();
+            $stats['zip_analysis_cleaned'] = $this->cleanupExpiredZipAnalysisOptimized();
+            $stats['temp_dirs_cleaned'] = $this->cleanupOrphanedTempDirsOptimized();
 
-            // 3. Limpiar análisis de ZIP expirados
-            $stats['zip_analysis_cleaned'] = $this->cleanupExpiredZipAnalysis();
+            // ✅ CALCULAR ESPACIO LIBERADO REAL
+            $finalSpace = $this->getDiskSpaceInfo();
+            $stats['space_freed_mb'] = round(($finalSpace['free_gb'] - $initialSpace['free_gb']) * 1024, 1);
 
-            // 4. Limpiar directorios temporales huérfanos
-            $stats['temp_dirs_cleaned'] = $this->cleanupOrphanedTempDirs();
+            // ✅ VERIFICACIÓN FINAL DE ESPACIO
+            $this->checkDiskSpaceOptimized();
 
-            // 5. Calcular espacio liberado aproximado
-            $stats['space_freed_mb'] = $this->calculateSpaceFreed($stats);
+            $processingTime = round(microtime(true) - $startTime, 2);
 
-            // 6. Verificar espacio disponible y alertar si es necesario
-            $this->checkDiskSpace();
-
-            Log::info("✅ Limpieza completada", $stats);
+            Log::info("✅ [OPTIMIZADO] Limpieza completada", array_merge($stats, [
+                'processing_time' => $processingTime . 's',
+                'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB'
+            ]));
 
         } catch (\Exception $e) {
-            Log::error("❌ Error en limpieza de archivos temporales: " . $e->getMessage());
+            $processingTime = round(microtime(true) - $startTime, 2);
+
+            Log::error("❌ Error en limpieza optimizada", [
+                'error' => $e->getMessage(),
+                'processing_time' => $processingTime . 's',
+                'stats_partial' => $stats
+            ]);
             throw $e;
         }
     }
 
     /**
-     * 🗑️ Limpiar descargas masivas expiradas
+     * ✅ LIMPIEZA OPTIMIZADA DE DESCARGAS EXPIRADAS
      */
-    private function cleanupExpiredDownloads(): int
+    private function cleanupExpiredDownloadsOptimized(): int
     {
+        Log::info("🗑️ Limpiando descargas expiradas...");
+
         $expiredBatches = DownloadBatch::where('status', 'completed')
             ->where(function($q) {
                 $q->where('expires_at', '<', now())
-                    ->orWhere('created_at', '<', now()->subDays(7)); // Fallback por si no hay expires_at
+                    ->orWhere('created_at', '<', now()->subDays(7));
             })
+            ->orderBy('created_at', 'asc') // ✅ Procesar más antiguos primero
             ->get();
 
         $cleaned = 0;
+        $spaceCleaned = 0;
+
         foreach ($expiredBatches as $batch) {
-            if ($batch->file_paths) {
-                foreach ($batch->file_paths as $filePath) {
-                    if (File::exists($filePath)) {
-                        File::delete($filePath);
-                        $cleaned++;
-                        Log::debug("🗑️ Eliminado: {$filePath}");
+            try {
+                if ($batch->file_paths) {
+                    foreach ($batch->file_paths as $filePath) {
+                        $size = $this->getFileSize($filePath);
+
+                        if ($this->deleteFileSecurely($filePath)) {
+                            $cleaned++;
+                            $spaceCleaned += $size;
+                        }
                     }
+
+                    // ✅ LIMPIAR REFERENCIAS EN BD
+                    $batch->update(['file_paths' => null]);
                 }
-                // Limpiar referencias en BD
-                $batch->update(['file_paths' => null]);
+
+                // ✅ LOG PROGRESO CADA 50 BATCHES
+                if ($cleaned % 50 === 0 && $cleaned > 0) {
+                    Log::info("📊 Progreso downloads: {$cleaned} archivos, " . round($spaceCleaned / 1024 / 1024, 1) . "MB liberados");
+                }
+
+            } catch (\Exception $e) {
+                Log::warning("⚠️ Error limpiando batch {$batch->id}: " . $e->getMessage());
             }
         }
 
-        // Eliminar registros muy antiguos (> 30 días)
-        DownloadBatch::where('created_at', '<', now()->subDays(30))->delete();
+        // ✅ ELIMINAR REGISTROS ANTIGUOS EN LOTES
+        $deletedRecords = DownloadBatch::where('created_at', '<', now()->subDays(30))
+            ->delete();
 
-        Log::info("🗑️ Downloads: {$cleaned} archivos eliminados");
+        Log::info("✅ Downloads limpieza: {$cleaned} archivos, {$deletedRecords} registros eliminados");
         return $cleaned;
     }
 
     /**
-     * 📄 Limpiar reportes expirados
+     * ✅ LIMPIEZA OPTIMIZADA DE REPORTES EXPIRADOS
      */
-    private function cleanupExpiredReports(): int
+    private function cleanupExpiredReportsOptimized(): int
     {
+        Log::info("📄 Limpiando reportes expirados...");
+
         $expiredReports = ReportGeneration::where('status', 'completed')
             ->where(function($q) {
                 $q->where('expires_at', '<', now())
-                    ->orWhere('created_at', '<', now()->subDays(14)); // Fallback: 14 días máximo
+                    ->orWhere('created_at', '<', now()->subDays(14));
             })
+            ->orderBy('created_at', 'asc')
             ->get();
 
         $cleaned = 0;
+
         foreach ($expiredReports as $report) {
-            $report->deleteFiles(); // Usa el método existente del modelo
-            $cleaned++;
+            try {
+                $report->deleteFiles(); // ✅ Usar método existente del modelo
+                $cleaned++;
+
+                if ($cleaned % 25 === 0 && $cleaned > 0) {
+                    Log::info("📊 Progreso reports: {$cleaned} reportes eliminados");
+                }
+
+            } catch (\Exception $e) {
+                Log::warning("⚠️ Error limpiando reporte {$report->id}: " . $e->getMessage());
+            }
         }
 
-        // Eliminar registros muy antiguos (> 60 días)
-        ReportGeneration::where('created_at', '<', now()->subDays(60))->delete();
+        // ✅ ELIMINAR REGISTROS MUY ANTIGUOS
+        $deletedRecords = ReportGeneration::where('created_at', '<', now()->subDays(60))
+            ->delete();
 
-        Log::info("📄 Reports: {$cleaned} reportes eliminados");
+        Log::info("✅ Reports limpieza: {$cleaned} reportes, {$deletedRecords} registros eliminados");
         return $cleaned;
     }
 
     /**
-     * 📦 Limpiar análisis de ZIP expirados
+     * ✅ LIMPIEZA OPTIMIZADA DE ANÁLISIS ZIP EXPIRADOS
      */
-    private function cleanupExpiredZipAnalysis(): int
+    private function cleanupExpiredZipAnalysisOptimized(): int
     {
-        $expiredAnalysis = ZipAnalysis::where('created_at', '<', now()->subHours(48)) // 48h para seguridad
-        ->get();
+        Log::info("📦 Limpiando análisis ZIP expirados...");
+
+        $expiredAnalysis = ZipAnalysis::where('created_at', '<', now()->subHours(72)) // ✅ 72h (era 48h)
+        ->orderBy('created_at', 'asc')
+            ->get();
 
         $cleaned = 0;
+
         foreach ($expiredAnalysis as $analysis) {
-            $analysis->cleanup(); // Usa el método existente del modelo
-            $analysis->delete();
-            $cleaned++;
+            try {
+                $analysis->cleanup(); // ✅ Usar método existente del modelo
+                $analysis->delete();
+                $cleaned++;
+
+                if ($cleaned % 10 === 0 && $cleaned > 0) {
+                    Log::info("📊 Progreso ZIP analysis: {$cleaned} análisis eliminados");
+                }
+
+            } catch (\Exception $e) {
+                Log::warning("⚠️ Error limpiando análisis {$analysis->id}: " . $e->getMessage());
+            }
         }
 
-        Log::info("📦 ZIP Analysis: {$cleaned} análisis eliminados");
+        Log::info("✅ ZIP analysis limpieza: {$cleaned} análisis eliminados");
         return $cleaned;
     }
 
     /**
-     * 🗂️ Limpiar directorios temporales huérfanos
+     * ✅ LIMPIEZA OPTIMIZADA DE DIRECTORIOS TEMPORALES HUÉRFANOS
      */
-    private function cleanupOrphanedTempDirs(): int
+    private function cleanupOrphanedTempDirsOptimized(): int
     {
+        Log::info("🗂️ Limpiando directorios temporales huérfanos...");
+
         $storagePath = storage_path('app');
         $cleaned = 0;
 
-        // Patrones de directorios temporales a limpiar
+        // ✅ PATRONES OPTIMIZADOS DE BÚSQUEDA
         $patterns = [
-            'temp_zip_*',
-            'temp_extract_*',
-            'temp_*',
-            'tmp/analyzed_*',
-            'tmp/temp_*'
+            'temp_zip_*' => 12,      // 12 horas
+            'temp_extract_*' => 12,  // 12 horas
+            'temp_crop_*' => 6,      // 6 horas
+            'tmp/analyzed_*' => 24,  // 24 horas
+            'tmp/temp_*' => 6,       // 6 horas
+            'downloads/*.zip' => 48, // ✅ ZIPs de descarga antiguos: 48h
         ];
 
-        foreach ($patterns as $pattern) {
-            $dirs = glob("{$storagePath}/{$pattern}");
+        foreach ($patterns as $pattern => $maxAgeHours) {
+            $paths = glob("{$storagePath}/{$pattern}");
+            $cutoffTime = strtotime("-{$maxAgeHours} hours");
 
-            foreach ($dirs as $dir) {
-                $isOld = filemtime($dir) < strtotime('-6 hours'); // Más de 6 horas
+            foreach ($paths as $path) {
+                try {
+                    $isOld = filemtime($path) < $cutoffTime;
 
-                if ($isOld && is_dir($dir)) {
-                    File::deleteDirectory($dir);
-                    $cleaned++;
-                    Log::debug("🗂️ Directorio eliminado: " . basename($dir));
+                    if ($isOld) {
+                        if (is_dir($path)) {
+                            File::deleteDirectory($path);
+                        } else {
+                            File::delete($path);
+                        }
+                        $cleaned++;
+
+                        Log::debug("🗑️ Eliminado: " . basename($path) . " (edad: " . round((time() - filemtime($path)) / 3600, 1) . "h)");
+                    }
+
+                } catch (\Exception $e) {
+                    Log::warning("⚠️ Error eliminando {$path}: " . $e->getMessage());
                 }
             }
         }
 
-        // Limpiar archivos sueltos en /tmp muy antiguos
-        $tempFiles = glob("{$storagePath}/tmp/*");
-        foreach ($tempFiles as $file) {
-            if (is_file($file) && filemtime($file) < strtotime('-24 hours')) {
-                File::delete($file);
-                $cleaned++;
-            }
-        }
+        // ✅ LIMPIEZA ESPECIAL DE ARCHIVOS TEMPORALES PEQUEÑOS
+        $this->cleanupSmallTempFiles($storagePath);
 
-        Log::info("🗂️ Temp dirs: {$cleaned} directorios/archivos eliminados");
+        Log::info("✅ Temp dirs limpieza: {$cleaned} elementos eliminados");
         return $cleaned;
     }
 
     /**
-     * 💾 Verificar espacio en disco y alertar
+     * ✅ LIMPIEZA DE ARCHIVOS TEMPORALES PEQUEÑOS
      */
-    private function checkDiskSpace(): void
+    private function cleanupSmallTempFiles(string $storagePath): void
+    {
+        $tempDirs = ['tmp', 'temp', 'cache'];
+
+        foreach ($tempDirs as $dir) {
+            $fullPath = "{$storagePath}/{$dir}";
+            if (!is_dir($fullPath)) continue;
+
+            try {
+                $files = new \RecursiveIteratorIterator(
+                    new \RecursiveDirectoryIterator($fullPath, \RecursiveDirectoryIterator::SKIP_DOTS)
+                );
+
+                $cleaned = 0;
+                foreach ($files as $file) {
+                    if ($file->isFile() &&
+                        $file->getMTime() < strtotime('-4 hours') &&
+                        $file->getSize() < 10 * 1024 * 1024) { // < 10MB
+
+                        @unlink($file->getPathname());
+                        $cleaned++;
+                    }
+                }
+
+                if ($cleaned > 0) {
+                    Log::info("🧹 Limpiados {$cleaned} archivos pequeños en /{$dir}");
+                }
+
+            } catch (\Exception $e) {
+                Log::warning("⚠️ Error limpiando directorio {$dir}: " . $e->getMessage());
+            }
+        }
+    }
+
+    /**
+     * ✅ VERIFICACIÓN OPTIMIZADA DE ESPACIO EN DISCO
+     */
+    private function checkDiskSpaceOptimized(): void
+    {
+        $spaceInfo = $this->getDiskSpaceInfo();
+
+        Log::info("💾 Estado del disco", [
+            'free_gb' => $spaceInfo['free_gb'],
+            'total_gb' => $spaceInfo['total_gb'],
+            'used_percent' => $spaceInfo['used_percent']
+        ]);
+
+        // ✅ ALERTAS OPTIMIZADAS PARA SERVIDOR POTENTE
+        if ($spaceInfo['free_gb'] < 10) {
+            Log::critical("🚨 ESPACIO CRÍTICO: Solo {$spaceInfo['free_gb']}GB libres!");
+            $this->emergencyCleanup();
+        } elseif ($spaceInfo['free_gb'] < 20) {
+            Log::warning("⚠️ ESPACIO BAJO: Solo {$spaceInfo['free_gb']}GB libres");
+            $this->moderateCleanup();
+        }
+
+        // ✅ MOSTRAR USO DETALLADO
+        $this->logDirectorySizesOptimized();
+    }
+
+    /**
+     * ✅ OBTENER INFORMACIÓN DE ESPACIO EN DISCO
+     */
+    private function getDiskSpaceInfo(): array
     {
         $storagePath = storage_path('app');
         $freeBytes = disk_free_space($storagePath);
         $totalBytes = disk_total_space($storagePath);
 
         if (!$freeBytes || !$totalBytes) {
-            Log::warning("⚠️ No se pudo obtener información del disco");
-            return;
+            return ['free_gb' => 0, 'total_gb' => 0, 'used_percent' => 100];
         }
 
         $freeGB = round($freeBytes / 1024 / 1024 / 1024, 2);
         $totalGB = round($totalBytes / 1024 / 1024 / 1024, 2);
         $usedPercent = round((($totalBytes - $freeBytes) / $totalBytes) * 100, 1);
 
-        Log::info("💾 Espacio en disco: {$freeGB}GB libres de {$totalGB}GB ({$usedPercent}% usado)");
-
-        // 🚨 Alertas críticas
-        if ($freeGB < 5) {
-            Log::critical("🚨 ESPACIO CRÍTICO: Solo {$freeGB}GB libres!");
-            // Aquí podrías enviar email/Slack/etc.
-        } elseif ($freeGB < 10) {
-            Log::warning("⚠️ ESPACIO BAJO: Solo {$freeGB}GB libres");
-        }
-
-        // 📊 Mostrar uso por directorio principal
-        $this->logDirectorySizes();
+        return [
+            'free_gb' => $freeGB,
+            'total_gb' => $totalGB,
+            'used_percent' => $usedPercent
+        ];
     }
 
     /**
-     * 📊 Calcular tamaños de directorios principales
+     * ✅ LOG OPTIMIZADO DE TAMAÑOS DE DIRECTORIOS
      */
-    private function logDirectorySizes(): void
+    private function logDirectorySizesOptimized(): void
     {
         $storagePath = storage_path('app');
-        $directories = ['downloads', 'reports', 'temp_zips', 'tmp', 'private'];
+        $directories = ['downloads', 'reports', 'temp_zips', 'tmp', 'uploads', 'cache'];
 
+        $sizes = [];
         foreach ($directories as $dir) {
             $fullPath = "{$storagePath}/{$dir}";
             if (is_dir($fullPath)) {
-                $sizeMB = $this->getDirectorySize($fullPath) / 1024 / 1024;
-                Log::info("📁 /{$dir}: " . round($sizeMB, 1) . "MB");
+                $sizeMB = $this->getDirectorySizeOptimized($fullPath) / 1024 / 1024;
+                $sizes[$dir] = round($sizeMB, 1);
             }
         }
+
+        // ✅ ORDENAR POR TAMAÑO DESCENDENTE
+        arsort($sizes);
+
+        Log::info("📊 Uso por directorio:", $sizes);
     }
 
     /**
-     * 📏 Calcular tamaño de directorio recursivamente
+     * ✅ CÁLCULO OPTIMIZADO DE TAMAÑO DE DIRECTORIO
      */
-    private function getDirectorySize($directory): int
+    private function getDirectorySizeOptimized($directory): int
     {
+        if (!is_dir($directory)) {
+            return 0;
+        }
+
         $size = 0;
         try {
             $iterator = new \RecursiveIteratorIterator(
@@ -255,26 +389,97 @@ class CleanupTemporaryFilesJob implements ShouldQueue
     }
 
     /**
-     * 🧮 Estimar espacio liberado (aproximado)
+     * ✅ LIMPIEZA DE EMERGENCIA
      */
-    private function calculateSpaceFreed($stats): float
+    private function emergencyCleanup(): void
     {
-        // Estimación basada en archivos típicos:
-        // Downloads: ~50MB promedio por ZIP
-        // Reports: ~20MB promedio por PDF
-        // ZIP Analysis: ~100MB promedio por análisis
-        // Temp dirs: ~10MB promedio
+        Log::warning("🚨 Ejecutando limpieza de emergencia...");
 
-        $estimatedMB = ($stats['downloads_cleaned'] * 50) +
-            ($stats['reports_cleaned'] * 20) +
-            ($stats['zip_analysis_cleaned'] * 100) +
-            ($stats['temp_dirs_cleaned'] * 10);
+        // ✅ ELIMINAR ARCHIVOS MUY ANTIGUOS AGRESIVAMENTE
+        $patterns = [
+            storage_path('app/downloads/*') => 24,     // 24h
+            storage_path('app/tmp/*') => 2,            // 2h
+            storage_path('app/temp_*') => 6,           // 6h
+        ];
 
-        return round($estimatedMB, 1);
+        $cleaned = 0;
+        foreach ($patterns as $pattern => $maxAgeHours) {
+            $files = glob($pattern);
+            $cutoff = strtotime("-{$maxAgeHours} hours");
+
+            foreach ($files as $file) {
+                if (filemtime($file) < $cutoff) {
+                    if (is_dir($file)) {
+                        File::deleteDirectory($file);
+                    } else {
+                        File::delete($file);
+                    }
+                    $cleaned++;
+                }
+            }
+        }
+
+        Log::info("🚨 Limpieza de emergencia: {$cleaned} elementos eliminados");
+    }
+
+    /**
+     * ✅ LIMPIEZA MODERADA
+     */
+    private function moderateCleanup(): void
+    {
+        Log::info("⚠️ Ejecutando limpieza moderada...");
+
+        // ✅ LIMPIAR ARCHIVOS INTERMEDIOS
+        $tempFiles = glob(storage_path('app/tmp/*.jpg'));
+        $cleaned = 0;
+
+        foreach ($tempFiles as $file) {
+            if (filemtime($file) < strtotime('-1 hour')) {
+                @unlink($file);
+                $cleaned++;
+            }
+        }
+
+        Log::info("⚠️ Limpieza moderada: {$cleaned} archivos temporales eliminados");
+    }
+
+    // ✅ MÉTODOS AUXILIARES
+
+    private function getFileSize(string $filePath): int
+    {
+        if (str_starts_with($filePath, 'downloads/')) {
+            $wasabi = Storage::disk('wasabi');
+            return $wasabi->exists($filePath) ? $wasabi->size($filePath) : 0;
+        } else {
+            return file_exists($filePath) ? filesize($filePath) : 0;
+        }
+    }
+
+    private function deleteFileSecurely(string $filePath): bool
+    {
+        try {
+            if (str_starts_with($filePath, 'downloads/')) {
+                $wasabi = Storage::disk('wasabi');
+                if ($wasabi->exists($filePath)) {
+                    return $wasabi->delete($filePath);
+                }
+            } else {
+                if (file_exists($filePath)) {
+                    return unlink($filePath);
+                }
+            }
+            return true;
+        } catch (\Exception $e) {
+            Log::warning("Error eliminando {$filePath}: " . $e->getMessage());
+            return false;
+        }
     }
 
     public function failed(\Exception $exception): void
     {
-        Log::error("❌ CleanupTemporaryFilesJob falló: " . $exception->getMessage());
+        Log::error("❌ CleanupTemporaryFilesJob falló", [
+            'error' => $exception->getMessage(),
+            'memory_peak' => memory_get_peak_usage(true) / 1024 / 1024 . 'MB'
+        ]);
     }
 }

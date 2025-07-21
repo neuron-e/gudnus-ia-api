@@ -9,7 +9,35 @@ Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-/*Schedule::command('reports:cleanup')
+// ============================================================================
+// TAREAS AUTOMÁTICAS PARA ARCHIVOS GRANDES Y LIMPIEZA
+// ============================================================================
+
+// ✅ LIMPIEZA DE ARCHIVOS MISTERIOSOS WASABI - Diaria a las 3:00 AM
+Schedule::command('wasabi:investigate --clean --days=7')
+    ->dailyAt('03:00')
+    ->timezone('Europe/Madrid')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->onFailure(function () {
+        \Log::error('Failed to cleanup mysterious Wasabi files');
+    })
+    ->onSuccess(function () {
+        \Log::info('Successfully cleaned up mysterious Wasabi files');
+    });
+
+// ✅ LIMPIEZA DE ARCHIVOS TEMPORALES - Cada 6 horas
+Schedule::command('cleanup:temp-files --force')
+    ->cron('0 */6 * * *')
+    ->timezone('Europe/Madrid')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->onFailure(function () {
+        \Log::error('Failed to cleanup temporary files');
+    });
+
+// ✅ LIMPIEZA DE REPORTES EXPIRADOS - Diaria a las 2:00 AM
+Schedule::command('reports:cleanup')
     ->dailyAt('02:00')
     ->timezone('Europe/Madrid')
     ->withoutOverlapping()
@@ -20,7 +48,7 @@ Artisan::command('inspire', function () {
         \Log::info('Successfully cleaned up expired reports');
     });
 
-// Health check de reportes cada hora
+// ✅ VERIFICAR REPORTES COLGADOS - Cada hora
 Schedule::call(function () {
     $stuckReports = ReportGeneration::where('status', 'processing')
         ->where('created_at', '<', now()->subHours(2))
@@ -39,9 +67,58 @@ Schedule::call(function () {
     }
 })->hourly();
 
-// Limpieza semanal más agresiva
-Schedule::command('reports:cleanup')
+// ✅ MONITOREO DE ESPACIO EN DISCO - Cada hora
+Schedule::call(function () {
+    $freeSpace = disk_free_space(storage_path('app'));
+    $freeGB = round($freeSpace / 1024 / 1024 / 1024, 2);
+
+    if ($freeGB < 10) {
+        \Log::critical("CRITICAL: Only {$freeGB}GB free space remaining");
+
+        // Ejecutar limpieza de emergencia
+        Artisan::call('cleanup:temp-files', ['--force' => true]);
+        Artisan::call('wasabi:investigate', ['--clean' => true, '--days' => 3]);
+    } elseif ($freeGB < 20) {
+        \Log::warning("WARNING: Only {$freeGB}GB free space remaining");
+    }
+})->hourly();
+
+// ✅ VERIFICAR Y REINICIAR HORIZON SI ESTÁ COLGADO - Cada 30 minutos
+Schedule::call(function () {
+    // Verificar si Horizon está corriendo
+    $output = '';
+    $returnVar = 0;
+    exec('php artisan horizon:status 2>&1', $output, $returnVar);
+
+    $isRunning = false;
+    foreach ($output as $line) {
+        if (strpos($line, 'running') !== false) {
+            $isRunning = true;
+            break;
+        }
+    }
+
+    if (!$isRunning) {
+        \Log::warning('Horizon not running, attempting restart');
+        Artisan::call('horizon:terminate');
+        sleep(10);
+        // Iniciar en background
+        exec('nohup php artisan horizon > storage/logs/horizon.log 2>&1 &');
+    }
+})->cron('*/30 * * * *');
+
+// ✅ LIMPIEZA SEMANAL MÁS AGRESIVA - Domingos a las 3:00 AM
+Schedule::command('wasabi:investigate --clean --days=3')
     ->weekly()
     ->sundays()
     ->at('03:00')
-    ->timezone('Europe/Madrid');*/
+    ->timezone('Europe/Madrid')
+    ->withoutOverlapping();
+
+// ✅ LIMPIEZA DE LOGS ANTIGUOS - Semanal
+Schedule::call(function () {
+    $logPath = storage_path('logs');
+    $command = "find {$logPath} -name '*.log' -type f -mtime +30 -delete";
+    exec($command);
+    \Log::info('Cleaned up old log files (>30 days)');
+})->weekly();

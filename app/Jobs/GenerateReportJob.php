@@ -32,10 +32,14 @@ class GenerateReportJob implements ShouldQueue
     public function __construct(
         public int $projectId,
         public ?string $userEmail = null,
-        public int $maxImagesPerPage = 5000, // ✅ CAMBIO CLAVE: Límite muy alto por defecto
-        public bool $includeAnalyzedImages = true
+        public int $maxImagesPerPage = 50, // ✅ REDUCIDO: Chunks muy pequeños
+        public bool $includeAnalyzedImages = false, // ✅ Desactivado por defecto
+        public bool $generateUnifiedPdf = true // ✅ Merge activado por defecto
     ) {}
 
+    /**
+     * @throws \Throwable
+     */
     public function handle(): void
     {
         $reportGeneration = ReportGeneration::where('project_id', $this->projectId)->latest()->first();
@@ -44,35 +48,26 @@ class GenerateReportJob implements ShouldQueue
             Log::info("🚀 Iniciando generación de PDF para proyecto {$this->projectId}");
 
             $project = Project::with(['children'])->findOrFail($this->projectId);
-
-            // ✅ 1. Preparar datos básicos del proyecto
             $this->loadProjectStructure($project);
 
-            // ✅ 2. Obtener TODAS las imágenes
             $allImages = $this->collectAllImages($project);
             $totalImages = $allImages->count();
-
-            $reportGeneration->update(['total_images' => $totalImages]);
 
             if ($totalImages === 0) {
                 throw new \Exception('No hay imágenes procesadas para generar el informe');
             }
 
-            Log::info("📊 Total de imágenes a procesar: {$totalImages}");
+            $reportGeneration->update(['total_images' => $totalImages]);
 
-            // ✅ 3. NUEVA LÓGICA: Solo fragmentar si es REALMENTE necesario
-            $memoryLimitMB = $this->getAvailableMemoryMB();
-            $estimatedMemoryNeededMB = $totalImages * 2; // ~2MB por imagen estimado
-
-            Log::info("🧠 Memoria disponible: {$memoryLimitMB}MB, estimada necesaria: {$estimatedMemoryNeededMB}MB");
-
-            if ($estimatedMemoryNeededMB > ($memoryLimitMB * 0.8)) {
-                // Solo si realmente no hay memoria suficiente
-                Log::info("⚠️ Memoria insuficiente, generando en partes optimizadas");
-                $this->generateOptimizedMultiPartReport($project, $allImages, $reportGeneration);
+            // ✅ ESTRATEGIA NUEVA: Siempre generar en partes + merge opcional
+            if ($totalImages > 100 && $this->generateUnifiedPdf) {
+                // 🔄 FLUJO COMPLETO: Partes + Merge
+                $this->generatePartsAndMergeStrategy($project, $allImages, $reportGeneration);
+            } else if ($totalImages > 100) {
+                // 📄 SOLO PARTES: Sin merge (para testing o preferencia usuario)
+                $this->generateMultiPartReport($project, $allImages, $reportGeneration);
             } else {
-                // ✅ CASO NORMAL: PDF único completo
-                Log::info("✅ Generando PDF único completo");
+                // 📋 PDF ÚNICO: Para proyectos pequeños
                 $this->generateSingleCompleteReport($project, $allImages, $reportGeneration);
             }
 
@@ -82,7 +77,6 @@ class GenerateReportJob implements ShouldQueue
                 'completed_at' => now()
             ]);
 
-            // ✅ 4. Enviar notificación por email
             if ($this->userEmail) {
                 Mail::to($this->userEmail)->send(new ReportGeneratedMail($reportGeneration));
             }
@@ -90,10 +84,7 @@ class GenerateReportJob implements ShouldQueue
             Log::info("✅ PDF generado exitosamente para proyecto {$this->projectId}");
 
         } catch (\Throwable $e) {
-            Log::error("❌ Error generando PDF: " . $e->getMessage(), [
-                'project_id' => $this->projectId,
-                'trace' => $e->getTraceAsString()
-            ]);
+            Log::error("❌ Error generando PDF: " . $e->getMessage());
 
             $reportGeneration->update([
                 'status' => 'failed',
@@ -103,6 +94,392 @@ class GenerateReportJob implements ShouldQueue
             throw $e;
         }
     }
+
+    private function generatePartsAndMergeStrategy($project, $allImages, $reportGeneration): void
+    {
+        $tempDir = $this->createTempDirectory();
+
+        try {
+            Log::info("🔄 Iniciando estrategia: Partes + Merge para {$allImages->count()} imágenes");
+
+            // ✅ FASE 1: Generar todas las partes de contenido
+            $contentPdfs = $this->generateContentParts($project, $allImages, $reportGeneration, $tempDir);
+
+            // ✅ FASE 2: Generar elementos estructurales (portada, índice, conclusiones)
+            $structuralPdfs = $this->generateStructuralElements($project, $allImages, $tempDir);
+
+            // ✅ FASE 3: Combinar todo en PDF único
+            $unifiedPdfPath = $this->mergeAllPdfs($project, $structuralPdfs, $contentPdfs, $tempDir);
+
+            // ✅ FASE 4: Subir PDF final y limpiar partes
+            $finalPath = $this->moveToFinalStorage($unifiedPdfPath, $project);
+            $reportGeneration->update(['file_path' => $finalPath]);
+
+            $sizeMB = round(filesize($unifiedPdfPath) / 1024 / 1024, 2);
+            Log::info("✅ PDF unificado generado: {$sizeMB}MB");
+
+        } finally {
+            $this->cleanupTempDirectory($tempDir);
+        }
+    }
+
+    /**
+     * ✅ FASE 1: Generar todas las partes de contenido
+     */
+    private function generateContentParts($project, $allImages, $reportGeneration, $tempDir): array
+    {
+        $totalImages = $allImages->count();
+        $maxImagesPerChunk = $this->getOptimalChunkSize($totalImages);
+        $chunks = $allImages->chunk($maxImagesPerChunk);
+
+        Log::info("📊 Generando {$chunks->count()} partes de contenido con ~{$maxImagesPerChunk} imágenes cada una");
+
+        $contentPdfs = [];
+
+        foreach ($chunks as $index => $chunk) {
+            $partNum = $index + 1;
+            Log::info("📄 Generando parte de contenido {$partNum} de {$chunks->count()} ({$chunk->count()} imágenes)");
+
+            // ✅ Pre-generar imágenes analizadas para este chunk
+            $analyzedImages = $this->preGenerateAnalyzedImages($chunk, $tempDir, $reportGeneration, "parte_{$partNum}");
+
+            // ✅ Generar PDF de contenido (SIN portada ni índice)
+            $contentPdf = $this->generateContentOnlyPdf($project, $chunk, $analyzedImages, $tempDir, $partNum, $chunks->count());
+            $contentPdfs[] = $contentPdf;
+
+            // ✅ Actualizar progreso
+            $progressSoFar = $partNum * $maxImagesPerChunk;
+            $reportGeneration->update(['processed_images' => min($progressSoFar, $totalImages)]);
+
+            $this->freeMemoryAggressive();
+        }
+
+        return $contentPdfs;
+    }
+
+    /**
+     * ✅ FASE 2: Generar elementos estructurales
+     */
+    private function generateStructuralElements($project, $allImages, $tempDir): array
+    {
+        Log::info("📋 Generando elementos estructurales del reporte");
+
+        $structuralPdfs = [];
+
+        // 1️⃣ PORTADA
+        $coverPath = $this->generateCoverPage($project, $allImages, $tempDir);
+        if ($coverPath) {
+            $structuralPdfs['cover'] = $coverPath;
+        }
+
+        // 2️⃣ ÍNDICE/RESUMEN
+        $indexPath = $this->generateIndexAndSummary($project, $allImages, $tempDir);
+        if ($indexPath) {
+            $structuralPdfs['index'] = $indexPath;
+        }
+
+        // 3️⃣ CONCLUSIONES
+        $conclusionsPath = $this->generateConclusionsPage($project, $allImages, $tempDir);
+        if ($conclusionsPath) {
+            $structuralPdfs['conclusions'] = $conclusionsPath;
+        }
+
+        return $structuralPdfs;
+    }
+
+    /**
+     * ✅ FASE 3: Combinar todos los PDFs en uno único
+     */
+    private function mergeAllPdfs($project, $structuralPdfs, $contentPdfs, $tempDir): string
+    {
+        Log::info("🔗 Combinando PDFs: " . (count($structuralPdfs) + count($contentPdfs)) . " archivos");
+
+        $merger = new Fpdi();
+
+        // ✅ 1. Agregar portada
+        if (isset($structuralPdfs['cover'])) {
+            $this->addPdfToMerger($merger, $structuralPdfs['cover']);
+        }
+
+        // ✅ 2. Agregar índice/resumen
+        if (isset($structuralPdfs['index'])) {
+            $this->addPdfToMerger($merger, $structuralPdfs['index']);
+        }
+
+        // ✅ 3. Agregar todas las partes de contenido en orden
+        foreach ($contentPdfs as $contentPdf) {
+            $this->addPdfToMerger($merger, $contentPdf);
+
+            // Liberar memoria cada pocas partes
+            if (count($contentPdfs) > 10) {
+                $this->freeMemory();
+            }
+        }
+
+        // ✅ 4. Agregar conclusiones
+        if (isset($structuralPdfs['conclusions'])) {
+            $this->addPdfToMerger($merger, $structuralPdfs['conclusions']);
+        }
+
+        // ✅ 5. Guardar PDF unificado
+        $unifiedPath = $tempDir . "/informe-completo-{$project->name}-" . now()->format('Y-m-d') . ".pdf";
+        $merger->Output($unifiedPath, 'F');
+
+        Log::info("✅ PDFs combinados exitosamente");
+        return $unifiedPath;
+    }
+
+    /**
+     * ✅ HELPER: Agregar PDF al merger con manejo de errores
+     */
+    private function addPdfToMerger($merger, $pdfPath): void
+    {
+        if (!file_exists($pdfPath)) {
+            Log::warning("⚠️ PDF no encontrado: {$pdfPath}");
+            return;
+        }
+
+        try {
+            $pageCount = $merger->setSourceFile($pdfPath);
+
+            for ($pageNum = 1; $pageNum <= $pageCount; $pageNum++) {
+                $merger->AddPage();
+                $template = $merger->importPage($pageNum);
+                $merger->useTemplate($template);
+            }
+
+            Log::debug("✅ Agregado: " . basename($pdfPath) . " ({$pageCount} páginas)");
+
+        } catch (\Exception $e) {
+            Log::error("❌ Error agregando PDF {$pdfPath}: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * ✅ Generar portada del reporte
+     */
+    private function generateCoverPage($project, $allImages, $tempDir): string
+    {
+        Log::info("🎨 Generando portada del reporte");
+
+        // ✅ Calcular estadísticas para la portada
+        $stats = $this->calculateProjectStats($allImages);
+
+        $pdf = Pdf::loadView('pdf.report_cover', [
+            'project' => $project,
+            'totalImages' => $allImages->count(),
+            'stats' => $stats,
+            'generatedAt' => now(),
+        ]);
+
+        $coverPath = $tempDir . "/00-portada.pdf";
+        $pdf->save($coverPath);
+
+        return $coverPath;
+    }
+
+    /**
+     * ✅ Generar índice y resumen ejecutivo
+     */
+    private function generateIndexAndSummary($project, $allImages, $tempDir): string
+    {
+        Log::info("📋 Generando índice y resumen ejecutivo");
+
+        $stats = $this->calculateProjectStats($allImages);
+        $sections = $this->calculateSectionBreakdown($allImages);
+
+        $pdf = Pdf::loadView('pdf.report_index', [
+            'project' => $project,
+            'stats' => $stats,
+            'sections' => $sections,
+            'totalImages' => $allImages->count(),
+        ]);
+
+        $indexPath = $tempDir . "/01-indice-resumen.pdf";
+        $pdf->save($indexPath);
+
+        return $indexPath;
+    }
+
+    /**
+     * ✅ Generar página de conclusiones
+     */
+    private function generateConclusionsPage($project, $allImages, $tempDir): string
+    {
+        Log::info("📊 Generando página de conclusiones");
+
+        $stats = $this->calculateProjectStats($allImages);
+        $recommendations = $this->generateRecommendations($stats);
+
+        $pdf = Pdf::loadView('pdf.report_conclusions', [
+            'project' => $project,
+            'stats' => $stats,
+            'recommendations' => $recommendations,
+            'totalImages' => $allImages->count(),
+        ]);
+
+        $conclusionsPath = $tempDir . "/99-conclusiones.pdf";
+        $pdf->save($conclusionsPath);
+
+        return $conclusionsPath;
+    }
+
+    /**
+     * ✅ Generar PDF solo de contenido (sin elementos estructurales)
+     */
+    private function generateContentOnlyPdf($project, $images, $analyzedImages, $tempDir, $partNumber, $totalParts): string
+    {
+        $title = "contenido-parte-{$partNumber}-de-{$totalParts}";
+
+        $pdf = Pdf::loadView('pdf.report_content_only', [
+            'project' => $project,
+            'images' => $images,
+            'analyzedImages' => $analyzedImages,
+            'partNumber' => $partNumber,
+            'totalParts' => $totalParts,
+            'showHeaders' => false, // ✅ Sin portadas ni headers principales
+        ]);
+
+        $pdf->setPaper('a4', 'portrait')->setOptions([
+            'isHtml5ParserEnabled' => true,
+            'isPhpEnabled' => false,
+            'isRemoteEnabled' => false,
+            'defaultFont' => 'Arial',
+            'dpi' => 120,
+            'debugPng' => false,
+            'debugKeepTemp' => false,
+            'debugCss' => false,
+            'tempDir' => $tempDir,
+        ]);
+
+        $contentPath = $tempDir . "/{$title}.pdf";
+        $pdf->save($contentPath);
+
+        return $contentPath;
+    }
+
+    /**
+     * ✅ Calcular estadísticas del proyecto para portada/conclusiones
+     */
+    private function calculateProjectStats($allImages): array
+    {
+        $totalImages = $allImages->count();
+        $imagesWithErrors = 0;
+        $errorsByType = [];
+        $totalErrors = 0;
+
+        foreach ($allImages as $image) {
+            if (!$image->processedImage || !$image->processedImage->ai_response_json) continue;
+
+            $aiResponse = json_decode($image->processedImage->ai_response_json, true);
+            if (!isset($aiResponse['predictions'])) continue;
+
+            $imageHasErrors = false;
+            foreach ($aiResponse['predictions'] as $prediction) {
+                if (($prediction['probability'] ?? 0) >= 0.3) {
+                    $errorType = $prediction['tagName'] ?? 'unknown';
+                    $errorsByType[$errorType] = ($errorsByType[$errorType] ?? 0) + 1;
+                    $totalErrors++;
+                    $imageHasErrors = true;
+                }
+            }
+
+            if ($imageHasErrors) {
+                $imagesWithErrors++;
+            }
+        }
+
+        return [
+            'total_images' => $totalImages,
+            'images_with_errors' => $imagesWithErrors,
+            'images_clean' => $totalImages - $imagesWithErrors,
+            'total_errors' => $totalErrors,
+            'errors_by_type' => $errorsByType,
+            'error_rate' => $totalImages > 0 ? round(($imagesWithErrors / $totalImages) * 100, 2) : 0,
+        ];
+    }
+
+    /**
+     * ✅ Calcular breakdown por secciones/carpetas
+     */
+    private function calculateSectionBreakdown($allImages): array
+    {
+        $sections = [];
+
+        foreach ($allImages as $image) {
+            $folderPath = $image->folder_path ?? 'Sin carpeta';
+
+            if (!isset($sections[$folderPath])) {
+                $sections[$folderPath] = [
+                    'total_images' => 0,
+                    'images_with_errors' => 0,
+                    'errors' => []
+                ];
+            }
+
+            $sections[$folderPath]['total_images']++;
+
+            // Analizar errores si existen
+            if ($image->processedImage && $image->processedImage->ai_response_json) {
+                $aiResponse = json_decode($image->processedImage->ai_response_json, true);
+                if (isset($aiResponse['predictions'])) {
+                    $hasErrors = false;
+                    foreach ($aiResponse['predictions'] as $prediction) {
+                        if (($prediction['probability'] ?? 0) >= 0.3) {
+                            $errorType = $prediction['tagName'] ?? 'unknown';
+                            $sections[$folderPath]['errors'][$errorType] = ($sections[$folderPath]['errors'][$errorType] ?? 0) + 1;
+                            $hasErrors = true;
+                        }
+                    }
+                    if ($hasErrors) {
+                        $sections[$folderPath]['images_with_errors']++;
+                    }
+                }
+            }
+        }
+
+        return $sections;
+    }
+
+    /**
+     * ✅ Generar recomendaciones basadas en estadísticas
+     */
+    private function generateRecommendations($stats): array
+    {
+        $recommendations = [];
+
+        if ($stats['error_rate'] > 20) {
+            $recommendations[] = "Se recomienda una inspección detallada ya que más del 20% de los módulos presentan defectos.";
+        }
+
+        if (isset($stats['errors_by_type']['cell_crack']) && $stats['errors_by_type']['cell_crack'] > 10) {
+            $recommendations[] = "Alta incidencia de grietas en celdas. Revisar manipulación y transporte.";
+        }
+
+        if (isset($stats['errors_by_type']['soldering_issue']) && $stats['errors_by_type']['soldering_issue'] > 5) {
+            $recommendations[] = "Problemas de soldadura detectados. Revisar proceso de manufactura.";
+        }
+
+        if ($stats['error_rate'] < 5) {
+            $recommendations[] = "Excelente calidad general. Módulos dentro de parámetros aceptables.";
+        }
+
+        return $recommendations;
+    }
+
+    /**
+     * ✅ Obtener tamaño óptimo de chunk para el servidor
+     */
+    private function getOptimalChunkSize($totalImages): int
+    {
+        return match(true) {
+            $totalImages > 2000 => 100,  // Proyectos masivos
+            $totalImages > 1000 => 150,  // Proyectos grandes
+            $totalImages > 500 => 200,   // Proyectos medianos
+            default => 300               // Proyectos pequeños
+        };
+    }
+
 
     /**
      * ✅ MÉTODO PRINCIPAL: Generar PDF único completo
