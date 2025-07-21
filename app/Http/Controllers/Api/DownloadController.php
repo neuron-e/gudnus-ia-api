@@ -90,7 +90,8 @@ class DownloadController extends Controller
 
         // ✅ Despachar job asíncrono
         dispatch(new GenerateDownloadZipJob($project->id, $type, $batch->id))
-            ->onQueue('downloads');
+            ->onQueue('downloads')
+            ->delay(now()->addSeconds(5)); // ✅ Pequeño delay para que se registre el batch
 
         Log::info("✅ Descarga masiva iniciada", [
             'project_id' => $project->id,
