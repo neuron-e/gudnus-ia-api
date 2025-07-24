@@ -118,19 +118,22 @@ class ProcessBulkImagesJob implements ShouldQueue
         // ✅ CONFIGURACIÓN DINÁMICA DE DELAYS SEGÚN CARGA
         $baseDelay = $this->calculateBaseDelay();
         $maxConcurrent = $this->getMaxConcurrentJobs();
+        $imageCount = count($imageIds);
 
-        Log::info("📋 Despachando {count($imageIds)} jobs individuales", [
+        // ✅ FIX: Usar concatenación en lugar de interpolación
+        Log::info("📋 Despachando " . $imageCount . " jobs individuales", [
             'chunk_index' => $this->chunkIndex,
             'base_delay' => $baseDelay,
-            'max_concurrent_estimate' => $maxConcurrent
+            'max_concurrent_estimate' => $maxConcurrent,
+            'image_count' => $imageCount
         ]);
 
         foreach ($imageIds as $index => $imageId) {
             // ✅ DELAY PROGRESIVO PARA DISTRIBUIR CARGA
-            $delay = $this->calculateJobDelay($index, $baseDelay, count($imageIds));
+            $delay = $this->calculateJobDelay($index, $baseDelay, $imageCount);
 
             // ✅ USAR COLA DE ALTA PRIORIDAD PARA CHUNKS PEQUEÑOS
-            $queue = count($imageIds) <= 10 ? 'high-priority' : 'analysis';
+            $queue = $imageCount <= 10 ? 'high-priority' : 'analysis';
 
             ProcessImageImmediatelyJob::dispatch($imageId, $this->batchId)
                 ->delay(now()->addSeconds($delay))
