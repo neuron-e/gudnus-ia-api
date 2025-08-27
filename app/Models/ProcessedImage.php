@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Storage;
 
 class ProcessedImage extends Model
 {
@@ -54,6 +55,20 @@ class ProcessedImage extends Model
         if (!$token || $this->public_token !== $token) return false;
         if ($this->public_token_expires_at && now()->greaterThan($this->public_token_expires_at)) return false;
         return true;
+    }
+
+    public function getOriginalUrlAttribute()
+    {
+        return $this->original_path
+            ? Storage::disk('wasabi')->url($this->original_path)
+            : null;
+    }
+
+    public function getCorrectedUrlAttribute()
+    {
+        return $this->corrected_path
+            ? Storage::disk('wasabi')->url($this->corrected_path)
+            : null;
     }
 
     public function image()
