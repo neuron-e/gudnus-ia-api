@@ -57,6 +57,18 @@ return function (Schedule $schedule) {
             \Log::info('Successfully cleaned up expired reports');
         });
 
+    // ✅ LIMPIEZA DE TOKENS PÚBLICOS EXPIRADOS - Diaria a las 2:30 AM
+    $schedule->command('tokens:cleanup')
+        ->dailyAt('02:30')
+        ->timezone('Europe/Madrid')
+        ->withoutOverlapping()
+        ->onFailure(function () {
+            \Log::error('Failed to cleanup expired tokens');
+        })
+        ->onSuccess(function () {
+            \Log::info('Successfully cleaned up expired tokens');
+        });
+
     // ✅ VERIFICAR REPORTES COLGADOS - Cada hora
     $schedule->call(function () {
         $stuckReports = ReportGeneration::where('status', 'processing')
