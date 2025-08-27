@@ -75,10 +75,10 @@ class GenerateReportJob implements ShouldQueue
                                 'integrity'    => $pi->image->analysisResult->integrity_score  ?? null,
                                 'luminosity'   => $pi->image->analysisResult->luminosity_score ?? null,
                                 'uniformity'   => $pi->image->analysisResult->uniformity_score ?? null,
-                                'microcracks_count'   => $pi->image->analysisResult->uniformity_score ?? null,
-                                'finger_interruptions_count'   => $pi->image->analysisResult->uniformity_score ?? null,
-                                'black_edges_count'   => $pi->image->analysisResult->uniformity_score ?? null,
-                                'cells_with_different_intesity'   => $pi->image->analysisResult->uniformity_score ?? null,
+                                'microcracks_count'   => $pi->image->analysisResult->microcracks_count ?? null,
+                                'finger_interruptions_count'   => $pi->image->analysisResult->finger_interruptions_count ?? null,
+                                'black_edges_count'   => $pi->image->analysisResult->black_edges_count ?? null,
+                                'cells_with_different_intensity'   => $pi->image->analysisResult->cells_with_different_intensity ?? null,
                                 'errors' => $this->acount($errorsArr), // ✅ nunca peta
                             'public_url'   => url("/report/processed-image/{$pi->id}?token={$pi->public_token}"),
                         ];
