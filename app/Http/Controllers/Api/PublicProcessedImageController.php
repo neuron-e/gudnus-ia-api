@@ -10,7 +10,6 @@ use App\Models\Image;
 use App\Models\ImageAnalysisResult;
 use App\Models\ImageBatch;
 use App\Models\ProcessedImage;
-use App\Models\Project;
 use App\Services\ImageProcessingService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\File;
@@ -32,17 +31,20 @@ class PublicProcessedImageController extends Controller
             return response()->json(['message' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
         }
 
+        $processedImage->loadMissing('image.project');
+        $project = $processedImage->image?->project;
+
         return response()->json([
             'id' => $processedImage->id,
-            'project' => [
-                'name' => $processedImage->project?->name,
-                'panel_brand' => $processedImage->project?->panel_brand,
-                'panel_model' => $processedImage->project?->panel_model,
-                'installation_name' => $processedImage->project?->installation_name,
-                'inspector_name' => $processedImage->project?->inspector_name,
-                'cell_count' => $processedImage->project?->cell_count,
-                'column_count' => $processedImage->project?->column_count,
-            ],
+            'project' => $project ? [
+                'name' => $project->name,
+                'panel_brand' => $project->panel_brand,
+                'panel_model' => $project->panel_model,
+                'installation_name' => $project->installation_name,
+                'inspector_name' => $project->inspector_name,
+                'cell_count' => $project->cell_count,
+                'column_count' => $project->column_count,
+            ] : null,
             'analysis_date'  => $processedImage->created_at?->toIso8601String(),
             'folder_path'    => $processedImage->folder_path ?? null,
             'original_url'   => $processedImage->original_url,
@@ -60,6 +62,9 @@ class PublicProcessedImageController extends Controller
                 'metadata'  => route('api.public.processed-image.download', ['processedImage' => $processedImage->id, 'type' => 'metadata',  'token' => $token]),
                 'results'   => route('api.public.processed-image.download', ['processedImage' => $processedImage->id, 'type' => 'results',   'token' => $token]),
             ],
+        ])->withHeaders([
+            'Cache-Control' => 'private, max-age=60',
+            'X-Content-Type-Options' => 'nosniff',
         ]);
     }
 
