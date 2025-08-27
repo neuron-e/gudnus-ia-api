@@ -73,12 +73,6 @@ class PublicProcessedImageController extends Controller
         }
 
         switch ($type) {
-            case 'original':
-                if ($processedImage->original_url) return redirect($processedImage->original_url);
-                break;
-            case 'corrected':
-                if ($processedImage->corrected_url) return redirect($processedImage->corrected_url);
-                break;
             case 'metadata':
                 return response()->json($processedImage->metadata ?? []);
             case 'results':
@@ -87,6 +81,22 @@ class PublicProcessedImageController extends Controller
                     'metrics'  => $processedImage->metrics ?? [],
                     'results'  => $processedImage->results ?? [],
                 ]);
+            case 'original':
+                $path = $processedImage->original_path
+                    ?: ltrim(parse_url($processedImage->original_url ?? '', PHP_URL_PATH), '/');
+                break;
+            case 'corrected':
+                $path = $processedImage->corrected_path
+                    ?: ltrim(parse_url($processedImage->corrected_url ?? '', PHP_URL_PATH), '/');
+                break;
+            default:
+                return response()->json(['message' => 'Bad Request'], Response::HTTP_BAD_REQUEST);
+        }
+
+        if ($path) {
+            $disk = Storage::disk('s3')->exists($path) ? 's3' : 'wasabi';
+            $tmp  = Storage::disk($disk)->temporaryUrl($path, now()->addMinutes(15));
+            return redirect($tmp);
         }
 
         return response()->json(['message' => 'Bad Request'], Response::HTTP_BAD_REQUEST);
