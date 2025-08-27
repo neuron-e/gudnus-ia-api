@@ -54,7 +54,7 @@ class GenerateReportJob implements ShouldQueue
 
                 // Si tu relación es diferente, ajusta 'processedImages'
                 $project->processedImages()
-                    ->select('id', 'project_id', 'folder_path', 'public_token', 'public_token_expires_at', 'public_view_enabled', 'metrics', 'errors', 'results', 'original_path', 'corrected_path', 'original_url', 'corrected_url')
+                    ->select('id', 'project_id', 'folder_path', 'public_token', 'public_token_expires_at', 'public_view_enabled', 'metrics', 'errors', 'results', 'original_path', 'corrected_path', 'original_url', 'corrected_url', 'thumb_url')
                     ->orderBy('id')
                     ->chunk(500, function ($chunk) use (&$rows) {
                         foreach ($chunk as $pi) {
@@ -64,7 +64,7 @@ class GenerateReportJob implements ShouldQueue
                             }
 
                             $metrics = $pi->metrics ?? [];
-                            $thumb = $pi->corrected_url ?? $pi->original_url;
+                            $thumb = $pi->thumb_url ?? ($pi->corrected_url ?? $pi->original_url);
 
                             $rows[] = [
                                 'id'           => $pi->id,

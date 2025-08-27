@@ -19,6 +19,8 @@ class ProcessedImage extends Model
         'public_token',
         'public_token_expires_at',
         'public_view_enabled',
+        'thumb_path',
+        'thumb_url',
     ];
 
     protected $casts = [

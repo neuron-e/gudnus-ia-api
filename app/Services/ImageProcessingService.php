@@ -7,6 +7,8 @@ use App\Models\ImageAnalysisResult;
 use App\Models\ProcessedImage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Intervention\Image\ImageManager;
+use Intervention\Image\Drivers\Imagick\Driver as ImagickDriver;
 
 class ImageProcessingService
 {
@@ -190,6 +192,8 @@ class ImageProcessingService
             $processed->corrected_path = $wasabiProcessedPath;
             $image->processedImage()->save($processed);
 
+            $this->generateThumbnail($processed, $wasabiProcessedPath);
+
             $analysis = $image->analysisResult ?? new ImageAnalysisResult();
             $analysis->fill([
                 'rows' => $jsonData['filas'] ?? $filas,
@@ -215,6 +219,29 @@ class ImageProcessingService
             if (isset($originalTemp)) @unlink($originalTemp);
             if (isset($outputTemp)) @unlink($outputTemp);
             return null; // ✅ Retornar null para activar fallback
+        }
+    }
+
+    private function generateThumbnail(ProcessedImage $processed, string $sourcePath): void
+    {
+        try {
+            $disk = Storage::disk('wasabi');
+            if (!$disk->exists($sourcePath)) {
+                return;
+            }
+
+            $thumbPath = 'thumbnails/480_' . basename($sourcePath);
+            $manager = new ImageManager(new ImagickDriver());
+            $image = $manager->read($disk->get($sourcePath));
+            $image->scaleDown(width: 480, height: 480);
+            $thumbData = (string) $image->encode('jpg', 80);
+            $disk->put($thumbPath, $thumbData);
+
+            $processed->thumb_path = $thumbPath;
+            $processed->thumb_url = $disk->url($thumbPath);
+            $processed->save();
+        } catch (\Throwable $e) {
+            Log::warning('Error generating thumbnail: ' . $e->getMessage());
         }
     }
 
@@ -367,6 +394,8 @@ class ImageProcessingService
             $processed = $image->processedImage ?? new ProcessedImage();
             $processed->corrected_path = $wasabiProcessedPath;
             $image->processedImage()->save($processed);
+
+            $this->generateThumbnail($processed, $wasabiProcessedPath);
 
             $analysis = $image->analysisResult ?? new ImageAnalysisResult();
             $analysis->fill([
