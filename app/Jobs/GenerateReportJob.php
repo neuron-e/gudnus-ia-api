@@ -20,6 +20,7 @@ use Intervention\Image\Drivers\Imagick\Driver as ImagickDriver;
 use Intervention\Image\Geometry\Rectangle;
 use Intervention\Image\ImageManager;
 use Intervention\Image\Typography\Font;
+use setasign\Fpdi\Fpdi;
 
 class GenerateReportJob implements ShouldQueue
 {
@@ -98,14 +99,21 @@ class GenerateReportJob implements ShouldQueue
                 $title = "informe-electroluminiscencia-completo-{$project->name}";
                 $pdfPath = $tempDir . "/{$title}.pdf";
                 $pdf->save($pdfPath);
-                // ✅ Mover a storage final
-                $finalPath = $this->moveToFinalStorage($pdfPath, $project);
 
+                // ✅ Generar elementos estructurales (portada, índice, conclusiones)
+                $structuralPdfs = $this->generateStructuralElements($project, $project->processedImages, $tempDir);
+
+                // ✅ Combinar portada/índice + tabla compacta + conclusiones
+                $unifiedPdfPath = $this->mergeAllPdfs($project, $structuralPdfs, [$pdfPath], $tempDir);
+
+                // ✅ Mover a storage final
+                $finalPath = $this->moveToFinalStorage($unifiedPdfPath, $project);
                 $reportGeneration->update(['file_path' => $finalPath]);
 
-                $sizeMB = round(filesize($pdfPath) / 1024 / 1024, 2);
-                Log::info("✅ PDF único generado: {$sizeMB}MB");
+                $sizeMB = round(filesize($unifiedPdfPath) / 1024 / 1024, 2);
+                Log::info("✅ PDF compacto unificado generado: {$sizeMB}MB");
 
+                $this->cleanupTempDirectory($tempDir);
 
             } else {
                 $this->loadProjectStructure($project);
@@ -450,9 +458,10 @@ class GenerateReportJob implements ShouldQueue
         $totalErrors = 0;
 
         foreach ($allImages as $image) {
-            if (!$image->processedImage || !$image->processedImage->ai_response_json) continue;
+            $processed = $image instanceof ProcessedImage ? $image : ($image->processedImage ?? null);
+            if (!$processed || !$processed->ai_response_json) continue;
 
-            $aiResponse = json_decode($image->processedImage->ai_response_json, true);
+            $aiResponse = json_decode($processed->ai_response_json, true);
             if (!isset($aiResponse['predictions'])) continue;
 
             $imageHasErrors = false;
@@ -501,8 +510,9 @@ class GenerateReportJob implements ShouldQueue
             $sections[$folderPath]['total_images']++;
 
             // Analizar errores si existen
-            if ($image->processedImage && $image->processedImage->ai_response_json) {
-                $aiResponse = json_decode($image->processedImage->ai_response_json, true);
+            $processed = $image instanceof ProcessedImage ? $image : ($image->processedImage ?? null);
+            if ($processed && $processed->ai_response_json) {
+                $aiResponse = json_decode($processed->ai_response_json, true);
                 if (isset($aiResponse['predictions'])) {
                     $hasErrors = false;
                     foreach ($aiResponse['predictions'] as $prediction) {
