@@ -30,6 +30,10 @@
         <th>Integridad</th>
         <th>Luminosidad</th>
         <th>Uniformidad</th>
+        <th>Microgrietas</th>
+        <th>Fingers</th>
+        <th>Bordes negros</th>
+        <th>Intensidad</th>
         <th>Errores</th>
         <th>URL pública</th>
     </tr>
@@ -43,6 +47,10 @@
             <td>{{ $r['integrity'] }}</td>
             <td>{{ $r['luminosity'] }}</td>
             <td>{{ $r['uniformity'] }}</td>
+            <td>{{ $r['microcracks_count'] }}</td>
+            <td>{{ $r['finger_interruptions_count'] }}</td>
+            <td>{{ $r['black_edges_count'] }}</td>
+            <td>{{ $r['cells_with_different_intensity'] }}</td>
             <td>{{ $r['errors_count'] }}</td>
             <td class="small">{{ $r['public_url'] }}</td>
         </tr>
