@@ -31,6 +31,12 @@ class PublicProcessedImageController extends Controller
             return response()->json(['message' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
         }
 
+        Log::info('Public processed image viewed', [
+            'processed_image_id' => $processedImage->id,
+            'ip' => $request->ip(),
+            'user_agent' => $request->userAgent(),
+        ]);
+
         $processedImage->loadMissing('image.project');
         $project = $processedImage->image?->project;
 
@@ -76,6 +82,13 @@ class PublicProcessedImageController extends Controller
         if (!$processedImage->isPublicTokenValid($token)) {
             return response()->json(['message' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
         }
+
+        Log::info('Public processed image download', [
+            'processed_image_id' => $processedImage->id,
+            'type' => $type,
+            'ip' => $request->ip(),
+            'user_agent' => $request->userAgent(),
+        ]);
 
         switch ($type) {
             case 'metadata':
