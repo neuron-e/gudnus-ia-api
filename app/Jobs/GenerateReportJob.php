@@ -74,10 +74,12 @@ class GenerateReportJob implements ShouldQueue
                                 'luminosity'   => $metrics['luminosity'] ?? null,
                                 'uniformity'   => $metrics['uniformity'] ?? null,
                                 'errors_count' => is_countable($pi->errors ?? []) ? count($pi->errors) : 0,
-                                'public_url'   => url("/report/processed-image/{$pi->id}?token={$pi->public_token}"),
-                            ];
-                        }
-                    });
+                            'public_url'   => url("/report/processed-image/{$pi->id}?token={$pi->public_token}"),
+                        ];
+                    }
+                });
+
+                $totalImages = count($rows);
 
                 // Render PDF ligero
                 $pdf = app('dompdf.wrapper');
