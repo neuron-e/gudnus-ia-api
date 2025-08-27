@@ -53,9 +53,7 @@ class GenerateReportJob implements ShouldQueue
                 $rows = [];
 
                 // Si tu relación es diferente, ajusta 'processedImages'
-                $project->processedImages()
-                    ->select('id', 'project_id', 'folder_path', 'public_token', 'public_token_expires_at', 'public_view_enabled', 'metrics', 'errors', 'results', 'original_path', 'corrected_path', 'original_url', 'corrected_url', 'thumb_url')
-                    ->orderBy('id')
+                $project->processedImages()->orderBy('id')
                     ->chunk(500, function ($chunk) use (&$rows) {
                         foreach ($chunk as $pi) {
                             // Emitir token si no es válido
@@ -63,17 +61,24 @@ class GenerateReportJob implements ShouldQueue
                                 $pi->issuePublicToken(now()->addMonths(6));
                             }
 
-                            $metrics = $pi->metrics ?? [];
+                            // 🔒 Normaliza posibles null/strings
+                            $metrics    = $this->asArray($pi->metrics);
+                            $errorsArr  = $this->asArray($pi->errors);
+
                             $thumb = $pi->thumb_url ?? ($pi->corrected_url ?? $pi->original_url);
 
                             $rows[] = [
                                 'id'           => $pi->id,
                                 'folder_path'  => $pi->folder_path,
                                 'thumb'        => $thumb,
-                                'integrity'    => $metrics['integrity']  ?? null,
-                                'luminosity'   => $metrics['luminosity'] ?? null,
-                                'uniformity'   => $metrics['uniformity'] ?? null,
-                                'errors_count' => is_countable($pi->errors ?? []) ? count($pi->errors) : 0,
+                                'integrity'    => $pi->image->analysisResult->integrity_score  ?? null,
+                                'luminosity'   => $pi->image->analysisResult->luminosity_score ?? null,
+                                'uniformity'   => $pi->image->analysisResult->uniformity_score ?? null,
+                                'microcracks_count'   => $pi->image->analysisResult->uniformity_score ?? null,
+                                'finger_interruptions_count'   => $pi->image->analysisResult->uniformity_score ?? null,
+                                'black_edges_count'   => $pi->image->analysisResult->uniformity_score ?? null,
+                                'cells_with_different_intesity'   => $pi->image->analysisResult->uniformity_score ?? null,
+                                'errors' => $this->acount($errorsArr), // ✅ nunca peta
                             'public_url'   => url("/report/processed-image/{$pi->id}?token={$pi->public_token}"),
                         ];
                     }
@@ -89,10 +94,19 @@ class GenerateReportJob implements ShouldQueue
                     'generated_at' => now(),
                 ])->setPaper('a4', 'portrait');
 
-                $path = "project_{$project->id}_compact.pdf";
-                Storage::disk('reports')->put($path, $pdf->output());
-                // Aquí puedes guardar referencia del PDF en BD o enviar notificación
-                $reportGeneration->update(['file_path' => $path]);
+                $tempDir = $this->createTempDirectory();
+                $title = "informe-electroluminiscencia-completo-{$project->name}";
+                $pdfPath = $tempDir . "/{$title}.pdf";
+                $pdf->save($pdfPath);
+                // ✅ Mover a storage final
+                $finalPath = $this->moveToFinalStorage($pdfPath, $project);
+
+                $reportGeneration->update(['file_path' => $finalPath]);
+
+                $sizeMB = round(filesize($pdfPath) / 1024 / 1024, 2);
+                Log::info("✅ PDF único generado: {$sizeMB}MB");
+
+
             } else {
                 $this->loadProjectStructure($project);
 
@@ -141,6 +155,25 @@ class GenerateReportJob implements ShouldQueue
 
             throw $e;
         }
+    }
+
+    /** Normaliza un valor a array. Acepta array, Collection o JSON string. */
+    private function asArray(mixed $value): array
+    {
+        if ($value === null) return [];
+        if (is_array($value)) return $value;
+        if ($value instanceof \Illuminate\Support\Collection) return $value->toArray();
+        if (is_string($value)) {
+            $decoded = json_decode($value, true);
+            return is_array($decoded) ? $decoded : [];
+        }
+        return [];
+    }
+
+    /** Cuenta de forma segura (array|Countable) */
+    private function acount(mixed $value): int
+    {
+        return is_countable($value) ? count($value) : 0;
     }
 
     private function generatePartsAndMergeStrategy($project, $allImages, $reportGeneration): void
