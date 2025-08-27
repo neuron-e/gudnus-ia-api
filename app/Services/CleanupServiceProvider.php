@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Providers;
+namespace App\Services;
 
 use App\Jobs\CleanupTemporaryFilesJob;
 use Illuminate\Console\Scheduling\Schedule;
