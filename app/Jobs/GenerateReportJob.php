@@ -64,21 +64,23 @@ class GenerateReportJob implements ShouldQueue
 
                             // 🔒 Normaliza posibles null/strings
                             $metrics    = $this->asArray($pi->metrics);
+                            $resultsArr = $this->asArray($pi->results);
                             $errorsArr  = $this->asArray($pi->errors);
 
-                            $thumb = $pi->thumb_url ?? ($pi->corrected_url ?? $pi->original_url);
+                            $thumb    = $pi->thumb_url ?? ($pi->corrected_url ?? $pi->original_url);
+                            $analysis = $pi->image->analysisResult;
 
                             $rows[] = [
                                 'id'           => $pi->id,
                                 'folder_path'  => $pi->folder_path,
                                 'thumb'        => $thumb,
-                                'integrity'    => $pi->image->analysisResult->integrity_score  ?? null,
-                                'luminosity'   => $pi->image->analysisResult->luminosity_score ?? null,
-                                'uniformity'   => $pi->image->analysisResult->uniformity_score ?? null,
-                                'microcracks_count'   => $pi->image->analysisResult->microcracks_count ?? null,
-                                'finger_interruptions_count'   => $pi->image->analysisResult->finger_interruptions_count ?? null,
-                                'black_edges_count'   => $pi->image->analysisResult->black_edges_count ?? null,
-                                'cells_with_different_intensity'   => $pi->image->analysisResult->cells_with_different_intensity ?? null,
+                                'integrity'    => $this->resolveMetric($analysis, $metrics, $resultsArr, 'integrity_score', 'integrity'),
+                                'luminosity'   => $this->resolveMetric($analysis, $metrics, $resultsArr, 'luminosity_score', 'luminosity'),
+                                'uniformity'   => $this->resolveMetric($analysis, $metrics, $resultsArr, 'uniformity_score', 'uniformity'),
+                                'microcracks_count'         => $this->resolveMetric($analysis, $metrics, $resultsArr, 'microcracks_count', 'microcracks_count'),
+                                'finger_interruptions_count' => $this->resolveMetric($analysis, $metrics, $resultsArr, 'finger_interruptions_count', 'finger_interruptions_count'),
+                                'black_edges_count'          => $this->resolveMetric($analysis, $metrics, $resultsArr, 'black_edges_count', 'black_edges_count'),
+                                'cells_with_different_intensity' => $this->resolveMetric($analysis, $metrics, $resultsArr, 'cells_with_different_intensity', 'cells_with_different_intensity'),
                                 'errors_count' => $this->acount($errorsArr), // ✅ nunca peta
                                 'public_url'   => url("/report/processed-image/{$pi->id}?token={$pi->public_token}"),
                         ];
@@ -172,8 +174,13 @@ class GenerateReportJob implements ShouldQueue
         if (is_array($value)) return $value;
         if ($value instanceof \Illuminate\Support\Collection) return $value->toArray();
         if (is_string($value)) {
-            $decoded = json_decode($value, true);
-            return is_array($decoded) ? $decoded : [];
+            try {
+                $decoded = json_decode($value, true, 512, JSON_THROW_ON_ERROR);
+                return is_array($decoded) ? $decoded : [];
+            } catch (\JsonException $e) {
+                Log::warning('Invalid JSON', ['error' => $e->getMessage()]);
+                return [];
+            }
         }
         return [];
     }
@@ -182,6 +189,16 @@ class GenerateReportJob implements ShouldQueue
     private function acount(mixed $value): int
     {
         return is_countable($value) ? count($value) : 0;
+    }
+
+    /** Obtiene una métrica con prioridad: analysisResult -> metrics -> results */
+    private function resolveMetric($analysis, array $metrics, array $results, string $analysisField, string $metricKey)
+    {
+        return data_get($analysis, $analysisField)
+            ?? data_get($metrics, $metricKey)
+            ?? data_get($results, $metricKey)
+            ?? data_get($results, 'metrics.' . $metricKey)
+            ?? null;
     }
 
     private function generatePartsAndMergeStrategy($project, $allImages, $reportGeneration): void
