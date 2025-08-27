@@ -19,11 +19,24 @@ class ProcessZipImageJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    // ✅ CONFIGURACIÓN OPTIMIZADA PARA SERVIDOR POTENTE
-    public $timeout = 900;      // ✅ 15 minutos por imagen (era 10)
-    public $tries = 3;          // ✅ Más reintentos (era 2)
-    public $maxExceptions = 3;
+    public $timeout = 1800; // 30 minutos
+    public $tries = 3;
+    public $maxExceptions = 2;
+    public $backoff = [60, 300, 900]; // 1min, 5min, 15min
 
+
+    private function optimizeMemorySettings(): void
+    {
+        // ✅ Configuraciones optimizadas para servidor potente
+        ini_set('memory_limit', '2G');
+        ini_set('max_execution_time', 1800); // 30 minutos
+
+        // Optimizar garbage collection
+        if (function_exists('gc_enable')) {
+            gc_enable();
+            gc_collect_cycles();
+        }
+    }
     // ✅ Backoff optimizado
     public function backoff(): array
     {

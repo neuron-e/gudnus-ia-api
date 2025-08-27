@@ -6,8 +6,7 @@ use Illuminate\Support\Facades\Route;
 
 use App\Models\User;
 
-use App\Http\Controllers\Api\{
-    AnalysisBatchController,
+use App\Http\Controllers\Api\{AnalysisBatchController,
     DownloadController,
     FolderController,
     ImageController,
@@ -15,14 +14,20 @@ use App\Http\Controllers\Api\{
     LargeZipController,
     ProcessedImageController,
     ProjectController,
+    PublicProcessedImageController,
     UnifiedBatchController,
-    ImageAnalysisResultController
-};
+    ImageAnalysisResultController};
 
 // ===========================
 // 🔐 Autenticación básica
 // ===========================
 Route::middleware('auth:sanctum')->get('/user', fn (Request $request) => $request->user());
+
+Route::prefix('public')->group(function () {
+    Route::get('processed-images/{processedImage}', [PublicProcessedImageController::class, 'show']);
+    Route::get('processed-images/{processedImage}/download', [PublicProcessedImageController::class, 'download'])
+        ->name('api.public.processed-image.download');
+});
 
 Route::post('/login', function (Request $request) {
     $user = User::where('email', $request->email)->first();

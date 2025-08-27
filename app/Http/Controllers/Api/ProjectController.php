@@ -263,7 +263,8 @@ class ProjectController extends Controller
             projectId: $project->id,
             userEmail: $request->input('user_email'), // ✅ CORREGIDO: era 'userEmail'
             maxImagesPerPage: $request->input('max_images_per_page', $defaultChunkSize), // ✅ Chunk dinámico
-            includeAnalyzedImages: $request->input('include_analyzed_images', true)
+            includeAnalyzedImages: $request->input('include_analyzed_images', true),
+            compact: $request->boolean('compact', true)
         );
 
         dispatch($job)->onQueue('reports');

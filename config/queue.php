@@ -67,9 +67,13 @@ return [
             'driver' => 'redis',
             'connection' => env('REDIS_QUEUE_CONNECTION', 'default'),
             'queue' => env('REDIS_QUEUE', 'default'),
-            'retry_after' => (int) env('REDIS_QUEUE_RETRY_AFTER', 86400), // ✅ 24 HORAS (era 90)
-            'block_for' => null,
+            'retry_after' => (int) env('REDIS_QUEUE_RETRY_AFTER', 1800), // 30 minutos
+            'block_for' => 5,
             'after_commit' => false,
+
+            // ✅ NUEVAS CONFIGURACIONES PARA SERVIDOR POTENTE
+            'memory_limit' => '2G', // Aprovechar más memoria
+            'timeout' => 1800, // 30 minutos para jobs pesados
         ],
         'batching' => [
             'database' => env('DB_CONNECTION', 'sqlite'),

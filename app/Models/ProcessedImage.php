@@ -4,6 +4,8 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Str;
 
 class ProcessedImage extends Model
 {
@@ -14,11 +16,40 @@ class ProcessedImage extends Model
         'detection_path',
         'ai_response_json',
         'error_edits_json',
+        'public_token',
+        'public_token_expires_at',
+        'public_view_enabled',
     ];
 
     protected $casts = [
         'error_edits_json' => 'array',
     ];
+
+    public function issuePublicToken(?Carbon $expiresAt = null): void
+    {
+        $this->public_token = (string) Str::uuid();
+        $this->public_token_expires_at = $expiresAt ?: now()->addMonths(6);
+        $this->public_view_enabled = true;
+        $this->save();
+    }
+
+    /** Revoca acceso público */
+    public function revokePublicToken(): void
+    {
+        $this->public_token = null;
+        $this->public_token_expires_at = null;
+        $this->public_view_enabled = false;
+        $this->save();
+    }
+
+    /** Valida token */
+    public function isPublicTokenValid(?string $token): bool
+    {
+        if (!$this->public_view_enabled) return false;
+        if (!$token || $this->public_token !== $token) return false;
+        if ($this->public_token_expires_at && now()->greaterThan($this->public_token_expires_at)) return false;
+        return true;
+    }
 
     public function image()
     {

@@ -34,7 +34,8 @@ class GenerateReportJob implements ShouldQueue
         public ?string $userEmail = null,
         public int $maxImagesPerPage = 50, // ✅ REDUCIDO: Chunks muy pequeños
         public bool $includeAnalyzedImages = false, // ✅ Desactivado por defecto
-        public bool $generateUnifiedPdf = true // ✅ Merge activado por defecto
+        public bool $generateUnifiedPdf = true, // ✅ Merge activado por defecto
+        public bool $compact = true // ✅ Merge activado por defecto
     ) {}
 
     /**
@@ -48,27 +49,72 @@ class GenerateReportJob implements ShouldQueue
             Log::info("🚀 Iniciando generación de PDF para proyecto {$this->projectId}");
 
             $project = Project::with(['children'])->findOrFail($this->projectId);
-            $this->loadProjectStructure($project);
+            if ($this->compact) {
+                $rows = [];
 
-            $allImages = $this->collectAllImages($project);
-            $totalImages = $allImages->count();
+                // Si tu relación es diferente, ajusta 'processedImages'
+                $project->processedImages()
+                    ->select('id', 'project_id', 'folder_path', 'public_token', 'public_token_expires_at', 'public_view_enabled', 'metrics', 'errors', 'results', 'original_path', 'corrected_path', 'original_url', 'corrected_url')
+                    ->orderBy('id')
+                    ->chunk(500, function ($chunk) use (&$rows) {
+                        foreach ($chunk as $pi) {
+                            // Emitir token si no es válido
+                            if (!$pi->isPublicTokenValid($pi->public_token)) {
+                                $pi->issuePublicToken(now()->addMonths(6));
+                            }
 
-            if ($totalImages === 0) {
-                throw new \Exception('No hay imágenes procesadas para generar el informe');
-            }
+                            $metrics = $pi->metrics ?? [];
+                            $thumb = $pi->corrected_url ?? $pi->original_url;
 
-            $reportGeneration->update(['total_images' => $totalImages]);
+                            $rows[] = [
+                                'id'           => $pi->id,
+                                'folder_path'  => $pi->folder_path,
+                                'thumb'        => $thumb,
+                                'integrity'    => $metrics['integrity']  ?? null,
+                                'luminosity'   => $metrics['luminosity'] ?? null,
+                                'uniformity'   => $metrics['uniformity'] ?? null,
+                                'errors_count' => is_countable($pi->errors ?? []) ? count($pi->errors) : 0,
+                                'public_url'   => url("/report/processed-image/{$pi->id}?token={$pi->public_token}"),
+                            ];
+                        }
+                    });
 
-            // ✅ ESTRATEGIA NUEVA: Siempre generar en partes + merge opcional
-            if ($totalImages > 100 && $this->generateUnifiedPdf) {
-                // 🔄 FLUJO COMPLETO: Partes + Merge
-                $this->generatePartsAndMergeStrategy($project, $allImages, $reportGeneration);
-            } else if ($totalImages > 100) {
-                // 📄 SOLO PARTES: Sin merge (para testing o preferencia usuario)
-                $this->generateMultiPartReport($project, $allImages, $reportGeneration);
+                // Render PDF ligero
+                $pdf = app('dompdf.wrapper');
+                $pdf->loadView('pdf.report_compact_table', [
+                    'project'      => $project,
+                    'rows'         => $rows,
+                    'generated_at' => now(),
+                ])->setPaper('a4', 'portrait');
+
+                $path = "project_{$project->id}_compact.pdf";
+                Storage::disk('reports')->put($path, $pdf->output());
+                // Aquí puedes guardar referencia del PDF en BD o enviar notificación
+                $reportGeneration->update(['file_path' => $path]);
             } else {
-                // 📋 PDF ÚNICO: Para proyectos pequeños
-                $this->generateSingleCompleteReport($project, $allImages, $reportGeneration);
+                $this->loadProjectStructure($project);
+
+                $allImages = $this->collectAllImages($project);
+                $totalImages = $allImages->count();
+
+                if ($totalImages === 0) {
+                    throw new \Exception('No hay imágenes procesadas para generar el informe');
+                }
+
+                $reportGeneration->update(['total_images' => $totalImages]);
+
+                // ✅ ESTRATEGIA NUEVA: Siempre generar en partes + merge opcional
+                if ($totalImages > 100 && $this->generateUnifiedPdf) {
+                    // 🔄 FLUJO COMPLETO: Partes + Merge
+                    $this->generatePartsAndMergeStrategy($project, $allImages, $reportGeneration);
+                } else if ($totalImages > 100) {
+                    // 📄 SOLO PARTES: Sin merge (para testing o preferencia usuario)
+                    $this->generateMultiPartReport($project, $allImages, $reportGeneration);
+                } else {
+                    // 📋 PDF ÚNICO: Para proyectos pequeños
+                    $this->generateSingleCompleteReport($project, $allImages, $reportGeneration);
+                }
+
             }
 
             $reportGeneration->update([
