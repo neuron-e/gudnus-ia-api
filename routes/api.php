@@ -23,7 +23,7 @@ use App\Http\Controllers\Api\{AnalysisBatchController,
 // ===========================
 Route::middleware('auth:sanctum')->get('/user', fn (Request $request) => $request->user());
 
-Route::prefix('public')->group(function () {
+Route::middleware('throttle:public-links')->prefix('public')->group(function () {
     Route::get('processed-images/{processedImage}', [PublicProcessedImageController::class, 'show']);
     Route::get('processed-images/{processedImage}/download', [PublicProcessedImageController::class, 'download'])
         ->name('api.public.processed-image.download');
