@@ -23,6 +23,9 @@ class ProcessedImage extends Model
 
     protected $casts = [
         'error_edits_json' => 'array',
+        'metrics' => 'array',
+        'results' => 'array',
+        'errors' => 'array',
     ];
 
     public function issuePublicToken(?Carbon $expiresAt = null): void
