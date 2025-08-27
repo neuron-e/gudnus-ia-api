@@ -79,8 +79,8 @@ class GenerateReportJob implements ShouldQueue
                                 'finger_interruptions_count'   => $pi->image->analysisResult->finger_interruptions_count ?? null,
                                 'black_edges_count'   => $pi->image->analysisResult->black_edges_count ?? null,
                                 'cells_with_different_intensity'   => $pi->image->analysisResult->cells_with_different_intensity ?? null,
-                                'errors' => $this->acount($errorsArr), // ✅ nunca peta
-                            'public_url'   => url("/report/processed-image/{$pi->id}?token={$pi->public_token}"),
+                                'errors_count' => $this->acount($errorsArr), // ✅ nunca peta
+                                'public_url'   => url("/report/processed-image/{$pi->id}?token={$pi->public_token}"),
                         ];
                     }
                 });
